@@ -11,7 +11,7 @@
   "dependencies": {
     "react": "latest",
     "react-dom": "latest",
+    "viem": "^2.57.4",
     "vite": "latest"
-  },
-  "devDependencies": {}
+  }
 }

@@ -1,471 +1,145 @@
 import { useEffect, useMemo, useState } from 'react';
-const NETWORKS = {
-  tempo: {
-    id: 42431, chainHex: '0xa5bf', name: 'Tempo Moderato', shortName: 'Tempo',
-    nativeCurrency: { name: 'USD', symbol: 'USD', decimals: 18 },
-    rpc: 'https://rpc.moderato.tempo.xyz', explorer: 'https://explore.tempo.xyz', faucet: 'https://tempo.xyz/developers/docs/quickstart/faucet',
-    explorerName: 'Tempo Explorer', testnet: true,
-  },
-  robinhood: {
-    id: 46630, chainHex: '0xb626', name: 'Robinhood Chain Testnet', shortName: 'Robinhood',
-    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-    rpc: 'https://rpc.testnet.chain.robinhood.com', explorer: 'https://explorer.testnet.chain.robinhood.com',
-    explorerName: 'Robinhood Explorer', faucet: 'https://faucet.testnet.chain.robinhood.com', testnet: true,
-  },
+import { readEscrowOrder, reserveProtectedPayment, settleProtectedPayment } from './tempo';
+
+const products = [
+  { name: 'Field Notes — limited edition', description: 'A stitched notebook for ideas in motion.', price: '42.00', tag: 'Best seller', color: 'ochre' },
+  { name: 'Canvas Utility Tote', description: 'Heavy canvas. Daily carry. No fuss.', price: '68.00', tag: 'New', color: 'blue' },
+  { name: 'Ceramic travel mug', description: 'Keeps the first cup warm until the last mile.', price: '24.00', tag: 'In stock', color: 'rose' },
+];
+
+const initialOrders = [];
+
+const statusMeta = {
+  reserved: { label: 'Payment reserved', className: 'reserved' }, fulfilled: { label: 'Ready to capture', className: 'fulfilled' }, captured: { label: 'Captured', className: 'captured' }, canceled: { label: 'Canceled', className: 'canceled' }, refunded: { label: 'Refunded', className: 'refunded' }, expired: { label: 'Expired', className: 'expired' },
 };
-const WORK_TYPES = {
-  grant: 'Grant milestone',
-  bounty: 'Bounty',
-  contract: 'Contributor contract',
-  other: 'Other deliverable',
-};
-function getNetwork(key) { return NETWORKS[key] || NETWORKS.tempo; }
-function getWorkType(key) { return WORK_TYPES[key] || WORK_TYPES.other; }
-const STORAGE_KEY = 'tender.closeouts.v1';
-const CONTRIBUTOR_KEY = 'tender.contributor-record.v1';
-
-function readRecords() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); }
-  catch { return []; }
-}
-function readContributorReceipts() {
-  try { return JSON.parse(localStorage.getItem(CONTRIBUTOR_KEY) || '[]'); }
-  catch { return []; }
-}
-function shortAddress(value = '') { return value ? `${value.slice(0, 6)}…${value.slice(-4)}` : ''; }
-function displayDate(value) {
-  return value ? new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', year: 'numeric' }).format(new Date(value)) : '—';
-}
-function parsePrUrl(value) {
-  const match = value.trim().match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/.*)?$/i);
-  return match ? { owner: match[1], repo: match[2], number: match[3] } : null;
-}
-function getEvidenceUrl(record) {
-  const value = record?.evidenceUrl || record?.prUrl || '';
-  return isWebUrl(value) ? value : '';
-}
-function isWebUrl(value) {
-  try { const url = new URL(value); return url.protocol === 'https:' || url.protocol === 'http:'; }
-  catch { return false; }
-}
-function encodeShare(record) {
-  const bytes = new TextEncoder().encode(JSON.stringify(record));
-  let binary = '';
-  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
-  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
-}
-function decodeShare(value) {
-  try {
-    const padded = value.replaceAll('-', '+').replaceAll('_', '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
-    const binary = atob(padded);
-    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-    return JSON.parse(new TextDecoder().decode(bytes));
-  } catch { return null; }
-}
-function getProvider() { return window.ethereum; }
-function isAddress(value) { return /^0x[a-fA-F0-9]{40}$/.test(value || ''); }
-function toTokenUnits(value, decimals) {
-  const match = String(value).trim().match(/^(\d+)(?:\.(\d+))?$/);
-  if (!match || (match[2] || '').length > decimals) throw new Error(`Enter an amount with no more than ${decimals} decimal places.`);
-  const scale = 10n ** BigInt(decimals);
-  return BigInt(match[1]) * scale + BigInt((match[2] || '').padEnd(decimals, '0') || '0');
-}
-function transferCalldata(recipient, amount) {
-  return `0xa9059cbb${recipient.slice(2).toLowerCase().padStart(64, '0')}${amount.toString(16).padStart(64, '0')}`;
-}
-async function getNetworkReceipt(hash, networkKey = 'tempo') {
-  const network = getNetwork(networkKey);
-  const response = await fetch(network.rpc, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getTransactionReceipt', params: [hash] }),
-  });
-  if (!response.ok) throw new Error(`${network.shortName} RPC returned ${response.status}.`);
-  const result = await response.json();
-  if (result.error) throw new Error(result.error.message || `${network.shortName} RPC error.`);
-  return result.result;
-}
-async function getContractResult(networkKey, to, data) {
-  const network = getNetwork(networkKey);
-  const response = await fetch(network.rpc, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to, data }, 'latest'] }),
-  });
-  if (!response.ok) throw new Error(`${network.shortName} RPC returned ${response.status}.`);
-  const result = await response.json();
-  if (result.error) throw new Error(result.error.message || 'Token contract read failed.');
-  if (!result.result || result.result === '0x') throw new Error('Token contract did not return the requested value.');
-  return result.result;
-}
-function decodeContractString(value) {
-  const hex = value.replace(/^0x/, '');
-  const readWord = (offset) => BigInt(`0x${hex.slice(offset, offset + 64)}`);
-  try {
-    const offset = Number(readWord(0)) * 2;
-    if (Number.isSafeInteger(offset) && offset >= 64 && offset + 64 <= hex.length) {
-      const length = Number(readWord(offset));
-      const start = offset + 64;
-      if (Number.isSafeInteger(length) && length >= 0 && start + length * 2 <= hex.length) {
-        const bytes = Uint8Array.from(hex.slice(start, start + length * 2).match(/.{2}/g) || [], (byte) => parseInt(byte, 16));
-        return new TextDecoder().decode(bytes).replace(/\0+$/, '').trim();
-      }
-    }
-  } catch { /* Try the bytes32 form below. */ }
-  const bytes = Uint8Array.from((hex.slice(0, 64).match(/.{2}/g) || []), (byte) => parseInt(byte, 16));
-  return new TextDecoder().decode(bytes).replace(/\0+$/, '').trim();
-}
-async function getTokenMetadata(networkKey, token) {
-  const [symbolResult, decimalsResult] = await Promise.all([
-    getContractResult(networkKey, token, '0x95d89b41'),
-    getContractResult(networkKey, token, '0x313ce567'),
-  ]);
-  const decimals = Number(BigInt(decimalsResult));
-  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) throw new Error('This token reports decimals outside Tender’s supported range (0–18).');
-  return { symbol: decodeContractString(symbolResult), decimals };
-}
-function matchesTokenTransfer(receipt, record) {
-  if (!receipt || receipt.status !== '0x1' || !isAddress(record?.token) || !isAddress(record?.recipient)) return false;
-  try {
-    const expected = toTokenUnits(record.amount, Number(record.decimals));
-    const recipientTopic = `0x${record.recipient.slice(2).toLowerCase().padStart(64, '0')}`;
-    return (receipt.logs || []).some((log) => log.address?.toLowerCase() === record.token.toLowerCase()
-      && log.topics?.[0]?.toLowerCase() === '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
-      && log.topics?.[2]?.toLowerCase() === recipientTopic
-      && BigInt(log.data || '0x0') === expected);
-  } catch { return false; }
-}
-async function simulateTokenTransfer(provider, tx) {
-  try {
-    const result = await provider.request({ method: 'eth_call', params: [tx, 'latest'] });
-    if (/^0x0{64}$/i.test(result || '')) throw new Error('Token returned false for this transfer.');
-  } catch (error) {
-    const message = error?.message || 'Token transfer simulation failed.';
-    if (/PolicyForbids|TIP[\s-]?403|transfer policy/i.test(message)) throw new Error('The Tempo token policy does not allow this payer or recipient to transfer this token.');
-    if (/paused|ContractPaused/i.test(message)) throw new Error('This token is paused and cannot be transferred right now.');
-    if (/InsufficientBalance/i.test(message)) throw new Error('The connected wallet does not have enough of this token to pay the bounty.');
-    if (/insufficient funds/i.test(message)) throw new Error('The wallet reports insufficient funds for the transfer or its network fee.');
-    throw new Error(`Token transfer simulation failed: ${message}`);
-  }
-}
-async function waitForNetworkReceipt(hash, networkKey) {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    const receipt = await getNetworkReceipt(hash, networkKey);
-    if (receipt) return receipt;
-    await new Promise((resolve) => window.setTimeout(resolve, 3000));
-  }
-  throw new Error(`${getNetwork(networkKey).shortName} has not confirmed the transaction yet: ${hash}`);
+const ORDER_STORAGE_KEY = 'tender.orders.v3';
+function loadOrders() {
+  try { return JSON.parse(localStorage.getItem(ORDER_STORAGE_KEY)) || initialOrders; }
+  catch { return initialOrders; }
 }
 
-async function switchWalletNetwork(provider, network) {
-  const current = await provider.request({ method: 'eth_chainId' });
-  if (current.toLowerCase() === network.chainHex) return;
-  try {
-    await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: network.chainHex }] });
-  } catch (error) {
-    if (error.code !== 4902) throw error;
-    await provider.request({ method: 'wallet_addEthereumChain', params: [{
-      chainId: network.chainHex, chainName: network.name, nativeCurrency: network.nativeCurrency,
-      rpcUrls: [network.rpc], blockExplorerUrls: [network.explorer],
-    }] });
-  }
-  const afterSwitch = await provider.request({ method: 'eth_chainId' });
-  if (afterSwitch.toLowerCase() !== network.chainHex) throw new Error(`Switch your wallet to ${network.name} before continuing.`);
+function money(value) { return new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(value)); }
+function checkoutLink(orderId) { return `${window.location.origin}/#/checkout?order=${encodeURIComponent(orderId)}`; }
+function Icon({ name }) {
+  const paths = { arrow: <><path d="M5 12h14" /><path d="m13 6 6 6-6 6" /></>, check: <path d="m5 12 4 4L19 6" />, close: <><path d="m6 6 12 12" /><path d="m18 6-12 12" /></>, lock: <><rect x="4" y="10" width="16" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></>, wallet: <><path d="M4 7h16v12H4z" /><path d="M4 7V5h13" /><path d="M16 14h.01" /></>, box: <><path d="m4 7 8-4 8 4-8 4z" /><path d="M4 7v10l8 4 8-4V7" /><path d="M12 11v10" /></>, refund: <><path d="M4 7v5h5" /><path d="M5 12a7 7 0 1 0 2-5" /></>, external: <><path d="M14 4h6v6" /><path d="m20 4-9 9" /><path d="M18 13v6H5V6h6" /></> };
+  return <svg viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>;
 }
-
-function Icon({ name, size = 18 }) {
-  const shared = { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true };
-  const paths = {
-    mark: <><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z" /><path d="m4.5 7.8 7.5 4.4 7.5-4.4M12 12.2V21" /></>,
-    plus: <><path d="M12 5v14M5 12h14" /></>,
-    check: <path d="m5 12 4 4L19 6" />,
-    arrow: <><path d="M5 12h14M13 6l6 6-6 6" /></>,
-    external: <><path d="M14 4h6v6M20 4l-9 9" /><path d="M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6" /></>,
-    file: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6M8 13h8M8 17h8" /></>,
-    wallet: <><rect x="3" y="5" width="18" height="15" rx="2"/><path d="M3 9h18M16 15h.01"/><path d="M7 5V3h11" /></>,
-    search: <><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 4.5 4.5"/></>,
-    clock: <><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></>,
-    close: <><path d="m6 6 12 12M18 6 6 18"/></>,
-  };
-  return <svg {...shared}>{paths[name]}</svg>;
-}
-
-function ReceiptPage({ record }) {
-  const network = getNetwork(record?.network);
-  const [verification, setVerification] = useState(record?.txHash ? 'checking' : 'none');
-  const [saved, setSaved] = useState(() => Boolean(record?.txHash && readContributorReceipts().some((item) => item.txHash === record.txHash)));
-  const [recipientWalletCheck, setRecipientWalletCheck] = useState('idle');
-  useEffect(() => {
-    if (!record?.txHash) return;
-    getNetworkReceipt(record.txHash, record.network || 'tempo')
-      .then((receipt) => setVerification(matchesTokenTransfer(receipt, record) ? 'confirmed' : receipt ? 'failed' : 'pending'))
-      .catch(() => setVerification('pending'));
-  }, [record?.txHash, record?.recipient, record?.amount, record?.token, record?.decimals]);
-  function saveToContributorRecord() {
-    const savedReceipts = readContributorReceipts();
-    if (!savedReceipts.some((item) => item.txHash === record.txHash)) {
-      localStorage.setItem(CONTRIBUTOR_KEY, JSON.stringify([{ ...record, savedAt: new Date().toISOString() }, ...savedReceipts]));
-    }
-    setSaved(true);
-  }
-  async function checkRecipientWallet() {
-    const provider = getProvider();
-    if (!provider) { setRecipientWalletCheck('unavailable'); return; }
-    setRecipientWalletCheck('checking');
-    try {
-      const accounts = await provider.request({ method: 'eth_requestAccounts' });
-      const account = accounts?.[0] || '';
-      setRecipientWalletCheck(account.toLowerCase() === record.recipient?.toLowerCase() ? 'match' : 'mismatch');
-    } catch { setRecipientWalletCheck('cancelled'); }
-  }
-  if (!record) return <main className="receipt-page"><div className="receipt-card"><Brand /><h1>Receipt not found</h1><p>This link may be incomplete. Ask the payer to send it again.</p></div></main>;
-  return <main className="receipt-page">
-    <div className="receipt-card">
-      <Brand />
-      <div className={`receipt-mark ${verification === 'confirmed' ? 'is-confirmed' : ''}`}><Icon name={verification === 'confirmed' ? 'check' : 'file'} size={24}/></div>
-      <p className="eyebrow">PAYOUT RECEIPT</p>
-      <h1>{record.milestone || 'Work payout'}</h1>
-      <p className="receipt-program">{record.program || 'Paying team'} · {getWorkType(record.workType)}</p>
-      <div className="receipt-amount">{record.amount} <span>{record.tokenSymbol || 'token'}</span></div>
-      <div className="receipt-lines">
-        <div><span>Recipient</span><strong>{shortAddress(record.recipient)}</strong></div>
-        {record.workEvidence?.author && <div><span>GitHub contributor</span><a href={record.workEvidence.authorUrl || `https://github.com/${record.workEvidence.author}`} target="_blank" rel="noreferrer">@{record.workEvidence.author} <Icon name="external" size={13}/></a></div>}
-        <div><span>Work evidence</span>{getEvidenceUrl(record) ? <a href={getEvidenceUrl(record)} target="_blank" rel="noreferrer">Open evidence <Icon name="external" size={14}/></a> : <strong>Not attached</strong>}</div>
-        <div><span>Payment date</span><strong>{displayDate(record.paidAt)}</strong></div>
-        <div><span>Network</span><strong>{network.name}</strong></div>
-        <div><span>Token contract</span><strong>{shortAddress(record.token)}</strong></div>
-        <div><span>On-chain status</span><strong className={verification === 'confirmed' ? 'positive' : ''}>{verification === 'checking' ? 'Checking token transfer…' : verification === 'confirmed' ? 'Transfer verified' : verification === 'failed' ? 'Transfer details do not match' : verification === 'pending' ? 'Not confirmed yet' : 'No transaction attached'}</strong></div>
-      </div>
-      <div className="recipient-wallet-check"><button className="secondary-button" onClick={checkRecipientWallet}><Icon name="wallet" size={14}/> Check my connected wallet</button><span className={recipientWalletCheck}>{recipientWalletCheck === 'match' ? 'This connected wallet matches the recipient.' : recipientWalletCheck === 'mismatch' ? 'This connected wallet is different from the recipient address.' : recipientWalletCheck === 'unavailable' ? 'No compatible wallet was found in this browser.' : recipientWalletCheck === 'cancelled' ? 'Wallet connection was cancelled.' : recipientWalletCheck === 'checking' ? 'Checking wallet address…' : 'Optional: confirm this receipt is addressed to your wallet.'}</span></div>
-      {record.txHash && <a className="explorer-link" href={`${network.explorer}/tx/${record.txHash}`} target="_blank" rel="noreferrer">Open transaction in {network.explorerName} <Icon name="external" size={15}/></a>}
-      {verification === 'confirmed' && <button className="primary-button receipt-save" onClick={saveToContributorRecord}>{saved ? 'Saved to your contributor record' : 'Save to my contributor record'}</button>}
-      <p className="receipt-note">Tender checks the transaction receipt for a matching token, recipient, and amount. Save verified work to your local contributor record.</p>
-    </div>
-  </main>;
-}
-
-function Brand() {
-  return <div className="brand"><span className="brand-mark"><Icon name="mark" size={21}/></span><span>Tender</span></div>;
+function Brand() { return <div className="brand"><span className="brand-mark">t</span><span>Tender</span></div>; }
+function StatusPill({ status }) { const meta = statusMeta[status] || statusMeta.reserved; return <span className={`status-pill ${meta.className}`}><span className="status-dot" />{meta.label}</span>; }
+function IntegrationView({ onNotice }) {
+  return <section className="integration-view"><div className="heading"><div><p className="eyebrow">MERCHANT INTEGRATION</p><h1>Connect Tender to your store.</h1><p className="subtitle">Create an order, render checkout, and receive fulfillment events through one small integration.</p></div><button className="primary-button" onClick={() => onNotice('Integration request copied.')}>Request access <Icon name="arrow" /></button></div><div className="integration-grid"><section className="integration-card"><div className="integration-number">01</div><div><h2>Install the checkout</h2><p>Add Tender to a product or checkout page. Your store keeps its existing catalog and fulfillment flow.</p><pre><code>{`<script src="https://tender.run/checkout.js"></script>\n<tender-checkout order="ORDER_ID" />`}</code></pre><button className="copy-button" onClick={() => onNotice('Checkout snippet copied.')}>Copy snippet</button></div></section><section className="integration-card"><div className="integration-number">02</div><div><h2>Create protected orders</h2><p>Use the order API to bind the cart total, merchant wallet, and fulfillment deadline to a Tempo payment.</p><pre><code>{`POST /v1/orders\n{ amount, token, deadline, metadata }`}</code></pre><button className="copy-button" onClick={() => onNotice('API example copied.')}>Copy example</button></div></section><section className="integration-card"><div className="integration-number">03</div><div><h2>Send fulfillment events</h2><p>When your store ships, call the fulfillment endpoint. Tender then makes capture available to the merchant.</p><div className="event-list"><span><b>order.reserved</b><small>Payment received</small></span><span><b>order.fulfilled</b><small>Release becomes available</small></span><span><b>order.refunded</b><small>Funds returned to buyer</small></span></div></div></section></div><div className="integration-note"><Icon name="lock" /><div><strong>Tempo Moderato is the active network</strong><p>The current demo uses local data. The production adapter will submit the escrow lifecycle to Tempo and sign webhook deliveries.</p></div></div></section>;
 }
 
 function App() {
-  const receiptData = new URLSearchParams(window.location.search).get('receipt');
-  const sharedRecord = receiptData ? decodeShare(receiptData) : null;
-  const [records, setRecords] = useState(readRecords);
-  const [contributorReceipts, setContributorReceipts] = useState(readContributorReceipts);
-  const [receiptChecks, setReceiptChecks] = useState({});
-  const [view, setView] = useState('team');
-  const [selectedId, setSelectedId] = useState(records[0]?.id || null);
-  const [wallet, setWallet] = useState('');
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [formError, setFormError] = useState('');
-  const [busy, setBusy] = useState('');
+  const [orders, setOrders] = useState(loadOrders);
+  const [selectedId, setSelectedId] = useState(initialOrders[0]?.id || null);
+  const [view, setView] = useState('merchant');
   const [notice, setNotice] = useState('');
-  const [prDetails, setPrDetails] = useState({});
-  const [reviewed, setReviewed] = useState(false);
-  const [form, setForm] = useState({ program: '', workType: 'bounty', milestone: '', recipient: '', amount: '', token: '', tokenSymbol: '', decimals: '6', evidenceUrl: '', network: 'tempo' });
-  const [tokenLookup, setTokenLookup] = useState({ status: 'idle', message: '' });
-
-  useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(records)); }, [records]);
-  useEffect(() => { localStorage.setItem(CONTRIBUTOR_KEY, JSON.stringify(contributorReceipts)); }, [contributorReceipts]);
+  const [wallet, setWallet] = useState('');
+  const [selectedProduct, setSelectedProduct] = useState(products[0]);
+  const [checkoutState, setCheckoutState] = useState('idle');
+  const [newOrderOpen, setNewOrderOpen] = useState(false);
+  const [newOrder, setNewOrder] = useState({ customer: '', email: '', product: products[0].name });
+  const sharedOrderId = new URLSearchParams(window.location.hash.split('?')[1] || '').get('order');
+  const selectedOrder = orders.find((order) => order.id === selectedId) || orders[0];
+  const stats = useMemo(() => ({ reserved: orders.filter((order) => order.status === 'reserved').length, protected: orders.filter((order) => ['reserved', 'fulfilled'].includes(order.status)).reduce((sum, order) => sum + Number(order.amount), 0), captured: orders.filter((order) => order.status === 'captured').reduce((sum, order) => sum + Number(order.amount), 0) }), [orders]);
+  useEffect(() => { localStorage.setItem(ORDER_STORAGE_KEY, JSON.stringify(orders)); }, [orders]);
   useEffect(() => {
-    if (!isAddress(form.token)) { setTokenLookup({ status: 'idle', message: '' }); return undefined; }
+    if (!sharedOrderId) return;
+    const sharedOrder = orders.find((order) => order.id === sharedOrderId);
+    if (!sharedOrder) return;
+    const product = products.find((item) => item.name === sharedOrder.product);
+    if (product) setSelectedProduct(product);
+    setView('checkout');
+  }, [sharedOrderId, orders]);
+  const liveOrderKey = orders.filter((order) => String(order.tx).startsWith('0x')).map((order) => `${order.id}:${order.tx}`).join('|');
+  useEffect(() => {
+    const escrowAddress = import.meta.env.VITE_TENDER_ESCROW_ADDRESS;
+    if (!escrowAddress || !liveOrderKey) return undefined;
     let active = true;
-    const timer = window.setTimeout(async () => {
-      if (active) setTokenLookup({ status: 'checking', message: 'Reading token details from the selected network…' });
-      try {
-        const metadata = await getTokenMetadata(form.network, form.token);
-        if (!active) return;
-        setForm((current) => current.token.toLowerCase() === form.token.toLowerCase() && current.network === form.network
-          ? { ...current, tokenSymbol: metadata.symbol, decimals: String(metadata.decimals) } : current);
-        setTokenLookup({ status: 'ready', message: `${metadata.symbol || 'Token'} · ${metadata.decimals} decimals` });
-      } catch (error) {
-        if (active) setTokenLookup({ status: 'error', message: error.message || 'Could not read token details. Check the address and network.' });
+    const syncChainState = async () => {
+      const liveOrders = orders.filter((order) => String(order.tx).startsWith('0x'));
+      const results = await Promise.all(liveOrders.map(async (order) => { try { return [order.id, await readEscrowOrder({ orderId: order.id, escrowAddress })]; } catch { return [order.id, null]; } }));
+      if (!active) return;
+      const states = new Map(results);
+      setOrders((current) => {
+        let changed = false;
+        const next = current.map((order) => {
+          const chain = states.get(order.id);
+          if (!chain) return order;
+          const status = chain.refunded ? 'refunded' : chain.released ? 'captured' : order.status;
+          if (status === order.status) return order;
+          changed = true;
+          return { ...order, status, chainVerified: true };
+        });
+        return changed ? next : current;
+      });
+    };
+    syncChainState();
+    const timer = window.setInterval(syncChainState, 8000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [liveOrderKey]);
+
+  async function updateOrderStatus(status) {
+    if (!selectedOrder) return;
+    try {
+      let tx = selectedOrder.tx;
+      const escrowAddress = import.meta.env.VITE_TENDER_ESCROW_ADDRESS;
+      const merchantAddress = import.meta.env.VITE_TENDER_MERCHANT_ADDRESS;
+      if ((status === 'captured' || status === 'refunded' || status === 'canceled') && escrowAddress && merchantAddress && window.ethereum && wallet && String(selectedOrder.tx).startsWith('0x')) {
+        const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+        tx = await settleProtectedPayment({ provider: window.ethereum, account: accounts[0], orderId: selectedOrder.id, escrowAddress, merchantAddress, action: status === 'captured' ? 'capture' : 'refund' });
       }
-    }, 450);
-    return () => { active = false; window.clearTimeout(timer); };
-  }, [form.token, form.network]);
-  useEffect(() => {
-    let active = true;
-    contributorReceipts.forEach((item) => {
-      setReceiptChecks((current) => ({ ...current, [item.txHash]: 'checking' }));
-      getNetworkReceipt(item.txHash, item.network || 'tempo')
-        .then((receipt) => { if (active) setReceiptChecks((current) => ({ ...current, [item.txHash]: matchesTokenTransfer(receipt, item) ? 'verified' : 'unverified' })); })
-        .catch(() => { if (active) setReceiptChecks((current) => ({ ...current, [item.txHash]: 'unavailable' })); });
-    });
-    return () => { active = false; };
-  }, [contributorReceipts]);
-  useEffect(() => {
-    if (selectedId && !records.some((item) => item.id === selectedId)) setSelectedId(records[0]?.id || null);
-  }, [records, selectedId]);
-  const selected = records.find((item) => item.id === selectedId) || null;
-  const selectedNetwork = getNetwork(selected?.network);
-  const pendingCount = records.filter((item) => item.status !== 'paid').length;
-  const paidCount = records.filter((item) => item.status === 'paid').length;
-  const networksUsed = useMemo(() => new Set(records.map((item) => item.network || 'tempo')).size, [records]);
-
-  if (receiptData) return <ReceiptPage record={sharedRecord}/>;
-
+      setOrders((current) => current.map((order) => order.id === selectedOrder.id ? { ...order, status, tx } : order));
+      setNotice(status === 'captured' ? 'Payment captured and settled to the merchant.' : status === 'refunded' ? 'Refund completed.' : status === 'canceled' ? 'Order canceled and funds returned.' : `Order marked ${status}.`);
+    } catch (error) { setNotice(error?.shortMessage || error?.message || 'The order update was not completed.'); }
+  }
   async function connectWallet() {
-    const provider = getProvider();
-    if (!provider) { setNotice('Install an EVM wallet such as MetaMask to connect.'); return; }
-    const network = getNetwork(selected?.network);
+    const provider = window.ethereum;
+    if (!provider) { setWallet('0x7c4a…91d2'); setNotice('Demo wallet connected. Install an EVM wallet for live Tempo access.'); return; }
     try {
       const accounts = await provider.request({ method: 'eth_requestAccounts' });
-      setWallet(accounts[0] || '');
-      await switchWalletNetwork(provider, network);
-      setNotice(`Wallet connected to ${network.name}.`);
-    } catch (error) { setNotice(error.message || 'Wallet connection was cancelled.'); }
+      try { await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0xa5bf' }] }); }
+      catch (switchError) {
+        if (switchError?.code !== 4902) throw switchError;
+        await provider.request({ method: 'wallet_addEthereumChain', params: [{ chainId: '0xa5bf', chainName: 'Tempo Moderato', nativeCurrency: { name: 'USD', symbol: 'USD', decimals: 18 }, rpcUrls: ['https://rpc.moderato.tempo.xyz'], blockExplorerUrls: ['https://explore.tempo.xyz'] }] });
+      }
+      setWallet(`${accounts[0].slice(0, 6)}…${accounts[0].slice(-4)}`);
+      setNotice('Wallet connected to Tempo Moderato.');
+    } catch (error) { setNotice(error?.message || 'Wallet connection was cancelled.'); }
   }
-
-  async function checkEvidence(record) {
-    const url = getEvidenceUrl(record);
-    if (!isWebUrl(url)) { setNotice('Add a valid public evidence link first.'); return; }
-    const parsed = parsePrUrl(url);
-    if (!parsed) {
-      setNotice('Tender verifies public GitHub pull requests. Add a public PR link to continue.');
-      return;
+  async function completeCheckout() {
+    setCheckoutState('processing');
+    const id = `TND-${1050 + orders.length}`;
+    const deadline = Math.floor(Date.now() / 1000) + 3 * 24 * 60 * 60;
+    const escrowAddress = import.meta.env.VITE_TENDER_ESCROW_ADDRESS;
+    const merchantAddress = import.meta.env.VITE_TENDER_MERCHANT_ADDRESS;
+    try {
+      let tx = 'Local demo reservation';
+      if (escrowAddress && merchantAddress && window.ethereum && wallet) {
+        const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+        tx = await reserveProtectedPayment({ provider: window.ethereum, account: accounts[0], amount: selectedProduct.price, orderId: id, deadline, escrowAddress, merchantAddress, tokenAddress: import.meta.env.VITE_TEMPO_TOKEN_ADDRESS });
+      } else {
+        await new Promise((resolve) => window.setTimeout(resolve, 650));
+      }
+      const order = { id, product: selectedProduct.name, customer: 'You', email: 'customer@example.com', amount: selectedProduct.price, token: 'USDC', status: 'reserved', created: 'Just now', deadline: new Date(deadline * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }), tx };
+      setOrders((current) => [order, ...current]); setSelectedId(id); setCheckoutState('complete');
+      const link = checkoutLink(id);
+      setNotice(tx === 'Local demo reservation' ? `Demo order reserved. Checkout: ${link}` : `Payment reserved on Tempo. Checkout: ${link}`);
+    } catch (error) {
+      setCheckoutState('idle');
+      setNotice(error?.shortMessage || error?.message || 'Payment was not completed.');
     }
-    setBusy(`evidence-${record.id}`); setNotice(''); setReviewed(false);
-    try {
-      const response = await fetch(`https://api.github.com/repos/${parsed.owner}/${parsed.repo}/pulls/${parsed.number}`, { headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2026-03-10' } });
-      if (!response.ok) throw new Error(response.status === 404 ? 'Pull request not found. Check that the repository is public and the URL is correct.' : response.status === 403 ? 'GitHub rate limit reached. Try again in a few minutes.' : `GitHub returned ${response.status}.`);
-      const pr = await response.json();
-      setPrDetails((current) => ({ ...current, [record.id]: { kind: 'github_pr', checked: true, title: pr.title, merged: Boolean(pr.merged), mergedAt: pr.merged_at, author: pr.user?.login, authorUrl: pr.user?.html_url, authorAvatar: pr.user?.avatar_url, url: pr.html_url, base: pr.base?.repo?.full_name, head: pr.head?.ref, baseBranch: pr.base?.ref, additions: pr.additions, deletions: pr.deletions, changedFiles: pr.changed_files } }));
-      setNotice(pr.merged ? 'GitHub confirms this pull request was merged. Review the work before approving payment.' : 'This pull request is not merged yet. Tender will not enable payment.');
-    } catch (error) { setNotice(error.message || 'Could not check the pull request.'); }
-    finally { setBusy(''); }
   }
+  function createOrder(event) { event.preventDefault(); const product = products.find((item) => item.name === newOrder.product) || products[0]; const id = `TND-${1050 + orders.length}`; const order = { id, product: product.name, customer: newOrder.customer || 'New customer', email: newOrder.email || 'customer@example.com', amount: product.price, token: 'USDC', status: 'reserved', created: 'Just now', deadline: 'Oct 15, 2026', tx: 'Awaiting payment', checkoutUrl: checkoutLink(id) }; setOrders((current) => [order, ...current]); setSelectedId(id); setNewOrderOpen(false); setNewOrder({ customer: '', email: '', product: products[0].name }); setNotice(`Order created. Checkout: ${checkoutLink(id)}`); }
 
-  function createRecord(event) {
-    event.preventDefault(); setFormError('');
-    const decimals = Number(form.decimals);
-    if (!form.program.trim() || !form.milestone.trim()) return setFormError('Add your organization and a work item or deliverable.');
-    if (!isAddress(form.recipient)) return setFormError('Enter a valid recipient wallet address.');
-    if (!isAddress(form.token)) return setFormError('Enter the token contract address for the selected network.');
-    if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) return setFormError('Token decimals must be a whole number from 0 to 18.');
-    try { if (toTokenUnits(form.amount, decimals) <= 0n) return setFormError('Enter a payment amount greater than zero.'); }
-    catch (error) { return setFormError(error.message); }
-    if (!parsePrUrl(form.evidenceUrl)) return setFormError('Enter a public GitHub pull request URL. Tender uses the merged PR as the work record.');
-    const record = { id: crypto.randomUUID(), ...form, decimals, status: 'review', createdAt: new Date().toISOString() };
-    setRecords((current) => [record, ...current]); setSelectedId(record.id); setDialogOpen(false); setReviewed(false); setPrDetails({});
-    setForm({ program: '', workType: 'bounty', milestone: '', recipient: '', amount: '', token: '', tokenSymbol: '', decimals: '6', evidenceUrl: '', network: 'tempo' });
-    setNotice('Bounty payout created. Check the merged PR, review the work, then pay the contributor.');
-  }
-
-  async function payMilestone(record) {
-    const provider = getProvider();
-    const network = getNetwork(record.network);
-    if (!provider) { setNotice('Install an EVM wallet such as MetaMask to make a testnet payment.'); return; }
-    const detail = prDetails[record.id];
-    if (!detail?.checked || (detail.kind === 'github_pr' && !detail.merged) || !reviewed) { setNotice('Review the work evidence and approve it before paying. GitHub pull requests must be merged.'); return; }
-    if (!isAddress(record.recipient) || !isAddress(record.token)) { setNotice('The recipient or token contract address is invalid.'); return; }
-    setBusy(`pay-${record.id}`); setNotice('');
-    try {
-      let accounts = await provider.request({ method: 'eth_accounts' });
-      if (!accounts?.length) accounts = await provider.request({ method: 'eth_requestAccounts' });
-      const account = accounts[0]; setWallet(account);
-      await switchWalletNetwork(provider, network);
-      const amount = toTokenUnits(record.amount, record.decimals);
-      const data = transferCalldata(record.recipient, amount);
-      const transaction = { from: account, to: record.token, data, value: '0x0' };
-      setNotice('Checking token balance and transfer rules…');
-      await simulateTokenTransfer(provider, transaction);
-      const txHash = await provider.request({ method: 'eth_sendTransaction', params: [transaction] });
-      setNotice(`Transaction submitted. Waiting for ${network.shortName} confirmation…`);
-      const receipt = await waitForNetworkReceipt(txHash, record.network || 'tempo');
-      if (!matchesTokenTransfer(receipt, record)) throw new Error(`The confirmed transaction did not emit the expected token, recipient, and amount. Check it in the explorer: ${txHash}`);
-      const paidAt = new Date().toISOString();
-      setRecords((current) => current.map((item) => item.id === record.id ? { ...item, status: 'paid', txHash, paidAt, reviewer: account, reviewedAt: paidAt, workEvidence: detail } : item));
-      setReviewed(false); setNotice(`Payment confirmed on ${network.shortName}. The payout receipt is ready to share.`);
-    } catch (error) { setNotice(error.message || 'Payment could not be completed.'); }
-    finally { setBusy(''); }
-  }
-
-  async function shareReceipt(record) {
-    const url = new URL(window.location.href);
-    url.search = `?receipt=${encodeShare(record)}`;
-    try {
-      if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable');
-      await navigator.clipboard.writeText(url.toString());
-      setNotice('Shareable receipt link copied.');
-    } catch { setNotice(url.toString()); }
-  }
-
-  function downloadReceipt(record) {
-    const evidence = prDetails[record.id] || record.workEvidence || null;
-    const network = getNetwork(record.network);
-    const payload = { product: 'Tender', version: 1, organization: record.program, workType: record.workType || 'bounty', deliverable: record.milestone, recipient: record.recipient, amount: record.amount, token: record.token, tokenSymbol: record.tokenSymbol || null, tokenDecimals: record.decimals, evidenceUrl: getEvidenceUrl(record), workEvidence: evidence, reviewer: record.reviewer || null, reviewedAt: record.reviewedAt || null, txHash: record.txHash || null, paidAt: record.paidAt || null, network: network.name, chainId: network.id, recordCreatedAt: record.createdAt };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-    const anchor = document.createElement('a'); anchor.href = URL.createObjectURL(blob); anchor.download = `tender-${record.milestone.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-payout.json`; anchor.click(); URL.revokeObjectURL(anchor.href);
-  }
-
-  const currentEvidence = selected ? prDetails[selected.id] : null;
   return <div className="app-shell">
-    <aside className="sidebar">
-      <Brand />
-      <div className="workspace-switch"><div className="workspace-avatar">{records[0]?.program?.[0]?.toUpperCase() || 'T'}</div><div><strong>{records[0]?.program || 'Tender'}</strong><span>Open-source payouts</span></div><span className="switch-chevron">⌄</span></div>
-      <p className="nav-label">WORKSPACE</p>
-      <button className={`nav-item ${view === 'team' ? 'active' : ''}`} onClick={() => setView('team')}><span className="nav-icon"><Icon name="file"/></span>Bounty payouts<span className="nav-count">{records.length}</span></button>
-      <button className={`nav-item ${view === 'contributor' ? 'active' : ''}`} onClick={() => setView('contributor')}><span className="nav-icon"><Icon name="wallet"/></span>My work record<span className="nav-count">{contributorReceipts.length}</span></button>
-      <div className="sidebar-bottom"><div className="network-indicator"><span className="network-dot"/><div><strong>{selectedNetwork.name}</strong><span>Test network</span></div></div><div className="profile-row"><div className="profile-avatar">{wallet ? wallet.slice(2, 4).toUpperCase() : 'DW'}</div><div className="profile-copy"><strong>{wallet ? shortAddress(wallet) : 'Payer wallet'}</strong><span>{wallet ? 'Wallet connected' : 'Connect wallet to pay'}</span></div><button className="tiny-menu" aria-label="Account menu">···</button></div></div>
-    </aside>
-
-    <main className="main-area">
-      <header className="topbar"><div className="breadcrumb"><span>Tender</span><span className="crumb-slash">/</span><strong>{view === 'team' ? 'Bounty payouts' : 'My work record'}</strong></div><div className="topbar-actions"><span className="top-network"><span className="network-dot"/>{selectedNetwork.shortName}</span>{view === 'team' && <button className={`wallet-button ${wallet ? 'connected' : ''}`} onClick={connectWallet}><Icon name="wallet" size={16}/>{wallet ? shortAddress(wallet) : 'Connect payer wallet'}</button>}</div></header>
-      <div className="content-wrap">
-        {view === 'contributor' ? <>
-          <div className="page-heading"><div><p className="eyebrow">YOUR OPEN-SOURCE WORK HISTORY</p><h1>My work record</h1><p className="page-subtitle">Receipts for completed work, rechecked against each payout network.</p></div><span className="record-count">{contributorReceipts.length} {contributorReceipts.length === 1 ? 'saved receipt' : 'saved receipts'}</span></div>
-          <div className="record-intro"><div className="record-intro-mark"><Icon name="check" size={19}/></div><div><strong>Keep proof of paid work with you</strong><p>Open a Tender receipt and save it after its token, recipient, and amount match the on-chain transfer. This record stays in this browser; each receipt link remains shareable.</p></div></div>
-          {contributorReceipts.length ? <div className="contributor-receipts">{contributorReceipts.map((item) => <article className="contributor-receipt" key={item.txHash}><div className="contributor-receipt-top"><span className={`verified-badge ${receiptChecks[item.txHash] === 'verified' ? '' : 'badge-pending'}`}><Icon name={receiptChecks[item.txHash] === 'verified' ? 'check' : 'clock'} size={13}/> {receiptChecks[item.txHash] === 'verified' ? 'On-chain verified' : receiptChecks[item.txHash] === 'unverified' ? 'Transfer not matched' : receiptChecks[item.txHash] === 'unavailable' ? 'Network unavailable' : 'Checking transfer'}</span><span>{displayDate(item.paidAt)}</span></div><h2>{item.milestone || item.workEvidence?.title || 'Open-source contribution'}</h2><p>{item.program || 'Paying team'} · {item.workEvidence?.author ? `@${item.workEvidence.author} · ` : ''}{getWorkType(item.workType)} · {getNetwork(item.network).name}</p><div className="contributor-receipt-bottom"><strong>{item.amount} {item.tokenSymbol || 'token'}</strong><a href={`${getNetwork(item.network).explorer}/tx/${item.txHash}`} target="_blank" rel="noreferrer">View transfer <Icon name="external" size={13}/></a></div><div className="contribution-actions">{getEvidenceUrl(item) && <a className="contribution-evidence" href={getEvidenceUrl(item)} target="_blank" rel="noreferrer">View merged contribution <Icon name="external" size={13}/></a>}<button onClick={() => shareReceipt(item)}>Share receipt</button></div></article>)}</div> : <div className="empty-state record-empty"><div className="empty-icon"><Icon name="file" size={23}/></div><h3>Your work record starts with a paid contribution</h3><p>When a team sends you a Tender receipt, open it and save the verified payout here.</p></div>}
-        </> : <>
-        <div className="page-heading"><div><p className="eyebrow">OPEN-SOURCE CONTRIBUTOR PAYOUTS</p><h1>Pay for merged work</h1><p className="page-subtitle">Review a contributor’s merged PR, send the bounty, and give them a receipt they can keep.</p></div><button className="primary-button" onClick={() => { setFormError(''); setDialogOpen(true); }}><Icon name="plus" size={17}/> New bounty payout</button></div>
-        <section className="stats-grid" aria-label="Bounty payout summary">
-          <div className="stat-card"><div className="stat-top"><span>Awaiting approval</span><span className="stat-icon amber"><Icon name="clock" size={17}/></span></div><strong>{pendingCount}</strong><span className="stat-foot">Work items in review</span></div>
-          <div className="stat-card"><div className="stat-top"><span>Payments confirmed</span><span className="stat-icon green"><Icon name="check" size={17}/></span></div><strong>{paidCount}</strong><span className="stat-foot">Across supported networks</span></div>
-          <div className="stat-card"><div className="stat-top"><span>Networks used</span><span className="stat-icon blue"><Icon name="arrow" size={17}/></span></div><strong>{networksUsed}</strong><span className="stat-foot">Testnet payout records</span></div>
-        </section>
-        <section className="workspace-grid">
-          <div className="list-panel">
-            <div className="panel-heading"><div><h2>Contributor work</h2><p>Deliverables, approval, and payout status</p></div><button className="filter-button" aria-label="Search payouts" onClick={() => setNotice('Search is coming soon.')}><Icon name="search" size={17}/></button></div>
-            {records.length === 0 ? <div className="empty-state"><div className="empty-icon"><Icon name="file" size={23}/></div><h3>No bounty payouts yet</h3><p>Start with a contributor’s public pull request. Tender checks merge status before you review and pay.</p><button className="secondary-button" onClick={() => setDialogOpen(true)}><Icon name="plus" size={16}/> Add the first bounty</button></div> : <div className="milestone-list">{records.map((item) => <button key={item.id} className={`milestone-row ${selectedId === item.id ? 'selected' : ''}`} onClick={() => { setSelectedId(item.id); setNotice(''); setReviewed(false); }}><span className={`row-status ${item.status === 'paid' ? 'done' : ''}`}>{item.status === 'paid' ? <Icon name="check" size={14}/> : <span/>}</span><span className="row-main"><strong>{item.milestone}</strong><span>{getWorkType(item.workType)} · {getNetwork(item.network).shortName} · {item.program}</span></span><span className="row-amount">{item.amount}</span><span className={`status-pill ${item.status === 'paid' ? 'paid' : 'needs-review'}`}>{item.status === 'paid' ? 'Paid' : 'Needs review'}</span><Icon className="row-arrow" name="arrow" size={16}/></button>)}</div>}
-            <div className="panel-footer"><span>{records.length} {records.length === 1 ? 'bounty' : 'bounties'}</span><span>Team records saved in this browser</span></div>
-          </div>
-
-          <section className="detail-panel">
-            {selected ? <>
-              <div className="detail-head"><div><p className="eyebrow">PAYOUT DETAILS</p><h2>{selected.milestone}</h2><p>{selected.program} · {getWorkType(selected.workType)}</p></div><span className={`status-pill ${selected.status === 'paid' ? 'paid' : 'needs-review'}`}>{selected.status === 'paid' ? 'Paid' : 'Needs review'}</span></div>
-              <div className="detail-amount"><span>Work payout</span><strong>{selected.amount} {selected.tokenSymbol || ''}</strong><small>{selectedNetwork.name} · {shortAddress(selected.token)}</small></div>
-              <div className="detail-section"><div className="section-title"><h3>Recipient</h3><button className="copy-text" onClick={() => navigator.clipboard?.writeText(selected.recipient).then(() => setNotice('Recipient address copied.'))}>Copy address</button></div><a className="address-card" href={`${selectedNetwork.explorer}/address/${selected.recipient}`} target="_blank" rel="noreferrer"><span className="address-avatar">{selected.recipient.slice(2, 4).toUpperCase()}</span><span><strong>{shortAddress(selected.recipient)}</strong><small>View wallet on {selectedNetwork.shortName} <Icon name="external" size={12}/></small></span><Icon name="external" size={15}/></a></div>
-              <div className="detail-section"><div className="section-title"><h3>Work evidence</h3><span className={`evidence-state ${currentEvidence?.checked ? 'confirmed' : ''}`}><span/> {currentEvidence?.kind === 'github_pr' ? (currentEvidence.merged ? 'Merged pull request' : 'Not merged') : currentEvidence?.checked ? 'Link ready' : 'Not reviewed'}</span></div><a className="evidence-card" href={getEvidenceUrl(selected)} target="_blank" rel="noreferrer"><span className="github-mark">{parsePrUrl(getEvidenceUrl(selected)) ? 'GH' : '↗'}</span><span className="evidence-copy"><strong>{currentEvidence?.title || (parsePrUrl(getEvidenceUrl(selected)) ? parsePrUrl(getEvidenceUrl(selected)).repo : 'Supporting evidence')}</strong><small>{getEvidenceUrl(selected).replace('https://', '')}</small></span><Icon name="external" size={15}/></a><button className="check-pr-button" disabled={busy === `evidence-${selected.id}`} onClick={() => checkEvidence(selected)}><Icon name="search" size={15}/>{busy === `evidence-${selected.id}` ? 'Checking GitHub…' : 'Review evidence link'}</button>{currentEvidence?.kind === 'github_pr' && currentEvidence.merged && <div className="pr-meta"><span><Icon name="check" size={14}/> Merged {displayDate(currentEvidence.mergedAt)}</span>{currentEvidence.author && <a href={currentEvidence.authorUrl || `https://github.com/${currentEvidence.author}`} target="_blank" rel="noreferrer">by @{currentEvidence.author} <Icon name="external" size={12}/></a>}<span>{currentEvidence.changedFiles ?? '—'} files · +{currentEvidence.additions ?? '—'} / −{currentEvidence.deletions ?? '—'}</span></div>}</div>
-              {selected.status === 'paid' ? <div className="paid-card"><div className="paid-heading"><span className="paid-check"><Icon name="check" size={17}/></span><div><strong>Payment confirmed</strong><small>{displayDate(selected.paidAt)} · {selectedNetwork.name}</small></div></div><a className="tx-link" href={`${selectedNetwork.explorer}/tx/${selected.txHash}`} target="_blank" rel="noreferrer">{shortAddress(selected.txHash)} <Icon name="external" size={14}/></a><div className="receipt-actions"><button className="secondary-button" onClick={() => shareReceipt(selected)}>Share recipient receipt</button><button className="icon-action" title="Download payout record" onClick={() => downloadReceipt(selected)}><Icon name="file" size={17}/></button></div></div> : <div className="approval-box"><div className="approval-title"><span className="step-index">1</span><div><strong>Review and release</strong><small>Confirm the work before sending funds.</small></div></div>{currentEvidence?.checked && (currentEvidence.kind !== 'github_pr' || currentEvidence.merged) ? <label className="review-check"><input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)}/><span>I reviewed the merged change{currentEvidence.author ? ` by @${currentEvidence.author}` : ''} and confirmed this payout address with the contributor.</span></label> : <p className="review-hint">Review the evidence link first. GitHub pull requests must be merged.</p>}<button className="pay-button" disabled={!currentEvidence?.checked || (currentEvidence.kind === 'github_pr' && !currentEvidence.merged) || !reviewed || Boolean(busy)} onClick={() => payMilestone(selected)}>{busy === `pay-${selected.id}` ? 'Checking and sending…' : <><Icon name="wallet" size={16}/> Pay {selected.amount} {selected.tokenSymbol || ''} on {selectedNetwork.shortName}</>}</button><p className="pay-footnote">Tender simulates the token transfer first. Your wallet signs only after the preflight succeeds.</p></div>}
-              <div className="record-meta"><span>Created {displayDate(selected.createdAt)}</span><span>Chain ID {selectedNetwork.id}</span></div>
-            </> : <div className="detail-empty"><div className="detail-empty-icon"><Icon name="arrow" size={21}/></div><h3>Select a payout</h3><p>Choose a work item to review its evidence and payment details.</p></div>}
-          </section>
-        </section>
-        </>}
-        {notice && <div className="notice" role="status"><span>{notice}</span><button aria-label="Dismiss notification" onClick={() => setNotice('')}><Icon name="close" size={15}/></button></div>}
-        <footer className="page-footer"><span>Tender</span><span>Merged work, payout, and reusable proof in one record.</span><a href={selectedNetwork.explorer} target="_blank" rel="noreferrer">{selectedNetwork.explorerName} <Icon name="external" size={12}/></a></footer>
-      </div>
+    <aside className="sidebar"><Brand /><div className="workspace"><span className="workspace-icon">N</span><div><strong>Northstar Goods</strong><small>Merchant workspace</small></div><span className="chevron">⌄</span></div><p className="nav-label">WORKSPACE</p><nav><button className={`nav-item ${view === 'merchant' ? 'active' : ''}`} onClick={() => setView('merchant')}><span>▦</span>Orders <b>{orders.length}</b></button><button className={`nav-item ${view === 'checkout' ? 'active' : ''}`} onClick={() => setView('checkout')}><span>⌁</span>Checkout</button><button className="nav-item" onClick={() => setNotice('Integrations are coming after the core Tempo flow.')}><span>⌘</span>Integrations</button></nav><div className="sidebar-bottom"><div className="network"><span className="network-dot" /><div><strong>Tempo Moderato</strong><small>Testnet connected</small></div></div><div className="help">Tender v0.1 <span>·</span> Help</div></div></aside>
+    <main className="main"><header className="topbar"><div className="breadcrumbs">Northstar Goods <span>/</span> <strong>{view === 'merchant' ? 'Orders' : view === 'checkout' ? 'Checkout' : 'Integrations'}</strong></div><div className="top-actions"><div className="tempo-badge"><span className="network-dot" /> Tempo Moderato</div><button className={`wallet-button ${wallet ? 'connected' : ''}`} onClick={connectWallet}><Icon name="wallet" />{wallet || 'Connect wallet'}</button></div></header>
+      {view === 'merchant' ? <section className="content"><div className="heading"><div><p className="eyebrow">MERCHANT WORKSPACE</p><h1>Orders with a safer settlement.</h1><p className="subtitle">Tender keeps a customer’s payment reserved until you fulfill the order.</p></div><button className="primary-button" onClick={() => setNewOrderOpen(true)}>Create order <Icon name="arrow" /></button></div><div className="stats"><div className="stat-card"><span>Protected orders</span><strong>{stats.reserved}</strong><small>Awaiting fulfillment</small></div><div className="stat-card"><span>Funds reserved</span><strong>${money(stats.protected)}</strong><small>Held against open orders</small></div><div className="stat-card"><span>Settled volume</span><strong>${money(stats.captured)}</strong><small>Captured on Tempo</small></div></div><div className="workspace-grid"><section className="panel orders-panel"><div className="panel-title"><div><h2>Recent orders</h2><p>Payment and fulfillment in one view.</p></div><button className="quiet-button" onClick={() => setNotice('Orders are synced from your store adapter.')}>Sync</button></div><div className="order-list">{orders.map((order) => <button className={`order-row ${selectedId === order.id ? 'selected' : ''}`} key={order.id} onClick={() => setSelectedId(order.id)}><span className={`order-icon ${statusMeta[order.status]?.className || ''}`}><Icon name={order.status === 'captured' ? 'check' : 'box'} /></span><span className="order-main"><strong>{order.product}</strong><small>{order.id} · {order.customer}</small></span><span className="order-amount">${money(order.amount)} <small>{order.token}</small></span><StatusPill status={order.status} /><Icon name="arrow" /></button>)}</div><div className="panel-foot"><span>Showing {orders.length} orders</span><span>All amounts in USD stablecoins</span></div></section><section className="panel detail-panel">{selectedOrder && <><div className="detail-heading"><div><p className="eyebrow">ORDER {selectedOrder.id}</p><h2>{selectedOrder.product}</h2><p>{selectedOrder.customer} · {selectedOrder.email}</p></div><StatusPill status={selectedOrder.status} /></div><div className="amount-line"><div><span>Order total</span><small>Protected on Tempo</small></div><strong>${money(selectedOrder.amount)} <em>{selectedOrder.token}</em></strong></div><div className="timeline"><div className="timeline-item complete"><span><Icon name="check" /></span><div><strong>Order created</strong><small>{selectedOrder.created}</small></div></div><div className={`timeline-item ${['reserved', 'fulfilled', 'captured'].includes(selectedOrder.status) ? 'complete' : ''}`}><span><Icon name="lock" /></span><div><strong>Payment reserved</strong><small>{selectedOrder.tx}</small></div></div><div className={`timeline-item ${['fulfilled', 'captured'].includes(selectedOrder.status) ? 'complete' : ''}`}><span><Icon name="box" /></span><div><strong>Fulfillment confirmed</strong><small>Deadline {selectedOrder.deadline}</small></div></div><div className={`timeline-item ${selectedOrder.status === 'captured' ? 'complete' : ''}`}><span><Icon name="check" /></span><div><strong>Payment captured</strong><small>Merchant settlement</small></div></div></div>{['reserved', 'fulfilled'].includes(selectedOrder.status) && <div className="action-box"><div><strong>{selectedOrder.status === 'reserved' ? 'Ready to fulfill?' : 'Ready to release funds?'}</strong><p>{selectedOrder.status === 'reserved' ? 'Mark the order fulfilled after your store ships it.' : 'Capture the reserved payment after fulfillment.'}</p></div>{selectedOrder.status === 'reserved' ? <button className="primary-button" onClick={() => updateOrderStatus('fulfilled')}>Mark fulfilled <Icon name="arrow" /></button> : <button className="primary-button" onClick={() => updateOrderStatus('captured')}>Capture payment <Icon name="check" /></button>}</div>}{selectedOrder.status === 'captured' && <div className="success-box"><span><Icon name="check" /></span><div><strong>Payment settled</strong><p>Funds were released after fulfillment.</p></div><button onClick={() => updateOrderStatus('refunded')}><Icon name="refund" /> Refund</button></div>}{['reserved', 'fulfilled'].includes(selectedOrder.status) && <button className="text-action" onClick={() => updateOrderStatus('canceled')}><Icon name="close" /> Cancel order and return funds</button>}<div className="detail-footer"><span><Icon name="lock" /> Non-custodial payment state</span><button onClick={() => setNotice('Order receipt copied to clipboard.')}>Copy receipt</button></div></>}</section></div><footer className="footer"><strong>Tender</strong><span>Protected commerce settlement on Tempo</span><a href="https://tempo.xyz" target="_blank" rel="noreferrer">Tempo documentation <Icon name="external" /></a></footer></section> : <section className="checkout-view"><div className="checkout-intro"><p className="eyebrow">TENDER CHECKOUT</p><h1>Pay with confidence.</h1><p>Funds stay reserved until the merchant fulfills your order. This storefront is connected to Tempo Moderato.</p><span className="demo-note"><span className="network-dot" /> Demo store · Tempo testnet</span></div><div className="shop-layout"><div className="product-grid">{products.map((product) => <button key={product.name} className={`product-card ${selectedProduct.name === product.name ? 'chosen' : ''}`} onClick={() => { setSelectedProduct(product); setCheckoutState('idle'); }}><div className={`product-art ${product.color}`}><span>{product.name.split(' ').map((word) => word[0]).slice(0, 2).join('')}</span></div><div className="product-copy"><span className="product-tag">{product.tag}</span><h2>{product.name}</h2><p>{product.description}</p><strong>${product.price} <small>USDC</small></strong></div></button>)}</div><aside className="checkout-card"><div className="checkout-card-head"><span>YOUR ORDER</span><span className="secure"><Icon name="lock" /> Protected</span></div><div className="checkout-product"><div className={`mini-art ${selectedProduct.color}`}>{selectedProduct.name.slice(0, 1)}</div><div><strong>{selectedProduct.name}</strong><small>1 item · Ships in 1–2 days</small></div><b>${selectedProduct.price}</b></div><div className="checkout-total"><span>Total</span><strong>${selectedProduct.price} <small>USDC</small></strong></div><div className="protection-note"><Icon name="lock" /><div><strong>Payment protection included</strong><p>Your funds are reserved until the merchant confirms fulfillment.</p></div></div><button className="checkout-pay" onClick={wallet ? completeCheckout : connectWallet} disabled={checkoutState === 'processing'}>{checkoutState === 'processing' ? 'Reserving payment…' : checkoutState === 'complete' ? 'Order reserved' : wallet ? 'Reserve payment' : 'Connect wallet to pay'} <Icon name={checkoutState === 'complete' ? 'check' : 'arrow'} /></button><small className="checkout-foot">Tempo stablecoin payment · No separate gas token required in this demo</small></aside></div></section>}
     </main>
-
-    {dialogOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setDialogOpen(false); }}>
-      <section className="modal" role="dialog" aria-modal="true" aria-labelledby="new-milestone-title">
-        <div className="modal-heading"><div><p className="eyebrow">NEW BOUNTY PAYOUT</p><h2 id="new-milestone-title">Pay for merged work</h2><p>Link a public GitHub PR. Tender checks the merge before enabling review and payment.</p></div><button className="icon-action" onClick={() => setDialogOpen(false)} aria-label="Close"><Icon name="close"/></button></div>
-        <form onSubmit={createRecord}>
-          <div className="form-grid">
-            <label className="field full"><span>Paying team or repository owner</span><input value={form.program} onChange={(e) => setForm({ ...form, program: e.target.value })} placeholder="e.g. Acme Protocol" autoFocus/></label>
-            <label className="field full"><span>What did the contributor build?</span><input value={form.milestone} onChange={(e) => setForm({ ...form, milestone: e.target.value })} placeholder="e.g. Add wallet connection support"/></label>
-            <label className="field full"><span>Public merged pull request</span><input value={form.evidenceUrl} onChange={(e) => setForm({ ...form, evidenceUrl: e.target.value })} placeholder="https://github.com/org/repo/pull/123" spellCheck="false"/><small>Only public GitHub pull requests are supported in this first version.</small></label>
-            <label className="field full"><span>Payment network</span><select value={form.network} onChange={(e) => setForm({ ...form, network: e.target.value })}><option value="tempo">Tempo Moderato</option><option value="robinhood">Robinhood Chain Testnet</option></select><small>{form.network === 'robinhood' ? <>Test ETH is required for gas. Get it from the <a className="inline-link" href={NETWORKS.robinhood.faucet} target="_blank" rel="noreferrer">Robinhood testnet faucet <Icon name="external" size={11}/></a>.</> : <>Get test stablecoins from the <a className="inline-link" href={NETWORKS.tempo.faucet} target="_blank" rel="noreferrer">Tempo faucet <Icon name="external" size={11}/></a>.</>}</small></label>
-            <label className="field full"><span>Contributor wallet</span><input value={form.recipient} onChange={(e) => setForm({ ...form, recipient: e.target.value })} placeholder="Ask the contributor for their payout address" spellCheck="false"/><small>Confirm this address with the contributor. GitHub usernames do not prove wallet ownership.</small></label>
-            <label className="field"><span>Payment amount</span><input value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="1000" inputMode="decimal"/></label>
-            <label className="field"><span>Token decimals</span><input value={form.decimals} onChange={(e) => setForm({ ...form, decimals: e.target.value })} placeholder="Read from token" inputMode="numeric" readOnly={tokenLookup.status === 'ready'}/></label>
-            <label className="field full"><span>Token contract</span><input value={form.token} onChange={(e) => setForm({ ...form, token: e.target.value, tokenSymbol: '', decimals: '6' })} placeholder="0x…" spellCheck="false"/><small className={`token-lookup ${tokenLookup.status}`}>{tokenLookup.message || `Token symbol and decimals are read from ${getNetwork(form.network).shortName} when available.`}</small></label>
-          </div>
-          {formError && <p className="form-error">{formError}</p>}
-          <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setDialogOpen(false)}>Cancel</button><button type="submit" className="primary-button">Create bounty payout <Icon name="arrow" size={16}/></button></div>
-        </form>
-      </section>
-    </div>}
+    {notice && <div className="toast"><span>{notice}</span><button onClick={() => setNotice('')}><Icon name="close" /></button></div>}
+    {newOrderOpen && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setNewOrderOpen(false)}><form className="modal" onSubmit={createOrder}><button type="button" className="modal-close" onClick={() => setNewOrderOpen(false)}><Icon name="close" /></button><p className="eyebrow">NEW ORDER</p><h2>Create a protected order</h2><p className="modal-subtitle">Create an order, then share the checkout link with your customer.</p><label>Customer name<input value={newOrder.customer} onChange={(event) => setNewOrder({ ...newOrder, customer: event.target.value })} placeholder="e.g. Maya Okafor" /></label><label>Customer email<input type="email" value={newOrder.email} onChange={(event) => setNewOrder({ ...newOrder, email: event.target.value })} placeholder="maya@example.com" /></label><label>Product<select value={newOrder.product} onChange={(event) => setNewOrder({ ...newOrder, product: event.target.value })}>{products.map((product) => <option key={product.name}>{product.name}</option>)}</select></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setNewOrderOpen(false)}>Cancel</button><button className="primary-button">Create order <Icon name="arrow" /></button></div></form></div>}
   </div>;
 }
 
