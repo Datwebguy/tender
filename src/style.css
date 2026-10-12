@@ -16,3 +16,4 @@
 @media(max-width:480px){.recipient-wallet-check{align-items:flex-start;flex-direction:column}}
 
 .list-search{display:flex;align-items:center;gap:8px;height:36px;padding:0 11px;border:1px solid var(--line);border-radius:9px;background:#fff;color:#929a93;min-width:0;flex:0 1 190px}.list-search input{border:0;outline:0;background:transparent;width:100%;min-width:0;font-size:12px;color:var(--ink)}.list-search:focus-within{border-color:var(--green)}.step-index svg{display:block}
+.negative{color:#a34d44!important}.signed-note{display:flex;align-items:center;gap:6px;margin:10px 0 0;color:#3d8056;font-size:11px;font-weight:600}.sign-button{width:100%;margin-top:10px;height:30px;font-size:11px}

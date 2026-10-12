@@ -1,7 +1,7 @@
 import { isAddress, isTxHash } from './format.js';
 
 // Only what a receipt needs. Reviewer wallet, internal ids and local timestamps stay out of shared links.
-const SHARE_FIELDS = ['program', 'workType', 'milestone', 'recipient', 'amount', 'token', 'tokenSymbol', 'decimals', 'evidenceUrl', 'network', 'txHash', 'paidAt'];
+const SHARE_FIELDS = ['program', 'workType', 'milestone', 'recipient', 'amount', 'token', 'tokenSymbol', 'decimals', 'evidenceUrl', 'network', 'txHash', 'paidAt', 'payer', 'signature'];
 const EVIDENCE_FIELDS = ['title', 'author', 'authorUrl', 'mergedAt', 'merged', 'url', 'additions', 'deletions', 'changedFiles'];
 
 export function toShareRecord(record) {
