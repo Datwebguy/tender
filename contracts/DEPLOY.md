@@ -1,6 +1,6 @@
 # Deploy Tender escrow
 
-The address currently in `.env.local` is an externally owned account, not a contract. Deploy `TenderEscrow.sol` before enabling live checkout.
+TenderEscrow is deployed on Tempo Moderato at `0x92ac3f063a75eed5920e18d0031e2646d939c731`. See `../HANDOVER.md` for the deployment transaction and configured merchant. The steps below are for deploying a separate instance.
 
 ## Remix path
 
@@ -16,4 +16,4 @@ VITE_TENDER_MERCHANT_ADDRESS=0xd305405708bd19090a91f174d0c49e39fa262db9
 
 5. Restart Vite. Tender checks the address for contract bytecode before requesting any token approval.
 
-The deployer does not receive custody of deposits. Buyers deposit TIP-20 tokens into the contract; capture sends the recorded amount to the recorded merchant, and refund returns it to the buyer.
+Buyers deposit TIP-20 tokens into the contract; capture sends the recorded amount to the recorded merchant, and refund returns it to the buyer. The buyer or merchant can capture an open order. Fulfillment is an application workflow, not a condition verified by this contract. Refund is available before capture to the buyer, or to any caller after the deadline. There is no contract refund after capture.

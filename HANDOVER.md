@@ -2,6 +2,10 @@
 
 Updated: 12 October 2026
 
+## Product continuity
+
+The current product is merchant commerce checkout and Tempo escrow settlement. Earlier grant, bounty, contributor-payout, and milestone-closeout versions are superseded. Commit `4379fe7` restored the commerce build after a reset to `cad57b0`; the public deployment was verified READY with the commerce dashboard and checkout bundle. See AGENTS.md before changing the product baseline.
+
 ## Live deployment
 
 - Production app: https://tender-beta-two.vercel.app
@@ -79,3 +83,5 @@ TENDER_MERCHANT_ADDRESS=0xd305405708bd19090a91f174d0c49e39fa262db9
 The webhook signer must be authorized by the escrow contract. Never put this key in a `VITE_` variable or in GitHub.
 
 Current order records are stored in browser local storage. Production merchant authentication, a database, store plugins, carrier integrations, and automatic fulfillment events are not yet implemented.
+
+Order links do not provide shared order metadata across browsers. The contract does not enforce delivery or fulfillment: the buyer or merchant can capture an open escrow. A buyer can refund before capture; after the deadline anyone can trigger the refund to the buyer. Captured payments cannot be refunded through this contract.
