@@ -1,178 +1,28 @@
 import { useEffect, useMemo, useState } from 'react';
-const NETWORKS = {
-  tempo: {
-    id: 42431, chainHex: '0xa5bf', name: 'Tempo Moderato', shortName: 'Tempo',
-    nativeCurrency: { name: 'USD', symbol: 'USD', decimals: 18 },
-    rpc: 'https://rpc.moderato.tempo.xyz', explorer: 'https://explore.tempo.xyz', faucet: 'https://tempo.xyz/developers/docs/quickstart/faucet',
-    explorerName: 'Tempo Explorer', testnet: true,
-  },
-  robinhood: {
-    id: 46630, chainHex: '0xb626', name: 'Robinhood Chain Testnet', shortName: 'Robinhood',
-    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-    rpc: 'https://rpc.testnet.chain.robinhood.com', explorer: 'https://explorer.testnet.chain.robinhood.com',
-    explorerName: 'Robinhood Explorer', faucet: 'https://faucet.testnet.chain.robinhood.com', testnet: true,
-  },
-};
-const WORK_TYPES = {
-  grant: 'Grant milestone',
-  bounty: 'Bounty',
-  contract: 'Contributor contract',
-  other: 'Other deliverable',
-};
-function getNetwork(key) { return NETWORKS[key] || NETWORKS.tempo; }
-function getWorkType(key) { return WORK_TYPES[key] || WORK_TYPES.other; }
+import { NETWORKS, getNetwork, getWorkType } from './lib/networks.js';
+import { shortAddress, displayDate, isWebUrl, safeUrl, parsePrUrl, prKey, getEvidenceUrl, isAddress, isTxHash, safeJsonArray } from './lib/format.js';
+import { encodeShare, decodeShare, isCheckableRecord } from './lib/share.js';
+import { toTokenUnits, transferCalldata, matchesTokenTransfer, getNetworkReceipt, getTokenMetadata, simulateTokenTransfer, waitForNetworkReceipt, switchWalletNetwork } from './lib/chain.js';
+
 const STORAGE_KEY = 'tender.closeouts.v1';
 const CONTRIBUTOR_KEY = 'tender.contributor-record.v1';
+const EMPTY_FORM = { program: '', workType: 'bounty', milestone: '', recipient: '', amount: '', token: '', tokenSymbol: '', decimals: '6', evidenceUrl: '', network: 'tempo' };
 
-function readRecords() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); }
+function readStored(key) {
+  try { return safeJsonArray(localStorage.getItem(key)); }
   catch { return []; }
 }
-function readContributorReceipts() {
-  try { return JSON.parse(localStorage.getItem(CONTRIBUTOR_KEY) || '[]'); }
-  catch { return []; }
+function writeStored(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); }
+  catch { /* Storage can be full or blocked; the in-memory list still works for this session. */ }
 }
-function shortAddress(value = '') { return value ? `${value.slice(0, 6)}…${value.slice(-4)}` : ''; }
-function displayDate(value) {
-  return value ? new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric', year: 'numeric' }).format(new Date(value)) : '—';
-}
-function parsePrUrl(value) {
-  const match = value.trim().match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/.*)?$/i);
-  return match ? { owner: match[1], repo: match[2], number: match[3] } : null;
-}
-function getEvidenceUrl(record) {
-  const value = record?.evidenceUrl || record?.prUrl || '';
-  return isWebUrl(value) ? value : '';
-}
-function isWebUrl(value) {
-  try { const url = new URL(value); return url.protocol === 'https:' || url.protocol === 'http:'; }
-  catch { return false; }
-}
-function encodeShare(record) {
-  const bytes = new TextEncoder().encode(JSON.stringify(record));
-  let binary = '';
-  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
-  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
-}
-function decodeShare(value) {
-  try {
-    const padded = value.replaceAll('-', '+').replaceAll('_', '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
-    const binary = atob(padded);
-    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-    return JSON.parse(new TextDecoder().decode(bytes));
-  } catch { return null; }
-}
+const readRecords = () => readStored(STORAGE_KEY);
+const readContributorReceipts = () => readStored(CONTRIBUTOR_KEY);
 function getProvider() { return window.ethereum; }
-function isAddress(value) { return /^0x[a-fA-F0-9]{40}$/.test(value || ''); }
-function toTokenUnits(value, decimals) {
-  const match = String(value).trim().match(/^(\d+)(?:\.(\d+))?$/);
-  if (!match || (match[2] || '').length > decimals) throw new Error(`Enter an amount with no more than ${decimals} decimal places.`);
-  const scale = 10n ** BigInt(decimals);
-  return BigInt(match[1]) * scale + BigInt((match[2] || '').padEnd(decimals, '0') || '0');
-}
-function transferCalldata(recipient, amount) {
-  return `0xa9059cbb${recipient.slice(2).toLowerCase().padStart(64, '0')}${amount.toString(16).padStart(64, '0')}`;
-}
-async function getNetworkReceipt(hash, networkKey = 'tempo') {
-  const network = getNetwork(networkKey);
-  const response = await fetch(network.rpc, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getTransactionReceipt', params: [hash] }),
-  });
-  if (!response.ok) throw new Error(`${network.shortName} RPC returned ${response.status}.`);
-  const result = await response.json();
-  if (result.error) throw new Error(result.error.message || `${network.shortName} RPC error.`);
-  return result.result;
-}
-async function getContractResult(networkKey, to, data) {
-  const network = getNetwork(networkKey);
-  const response = await fetch(network.rpc, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to, data }, 'latest'] }),
-  });
-  if (!response.ok) throw new Error(`${network.shortName} RPC returned ${response.status}.`);
-  const result = await response.json();
-  if (result.error) throw new Error(result.error.message || 'Token contract read failed.');
-  if (!result.result || result.result === '0x') throw new Error('Token contract did not return the requested value.');
-  return result.result;
-}
-function decodeContractString(value) {
-  const hex = value.replace(/^0x/, '');
-  const readWord = (offset) => BigInt(`0x${hex.slice(offset, offset + 64)}`);
-  try {
-    const offset = Number(readWord(0)) * 2;
-    if (Number.isSafeInteger(offset) && offset >= 64 && offset + 64 <= hex.length) {
-      const length = Number(readWord(offset));
-      const start = offset + 64;
-      if (Number.isSafeInteger(length) && length >= 0 && start + length * 2 <= hex.length) {
-        const bytes = Uint8Array.from(hex.slice(start, start + length * 2).match(/.{2}/g) || [], (byte) => parseInt(byte, 16));
-        return new TextDecoder().decode(bytes).replace(/\0+$/, '').trim();
-      }
-    }
-  } catch { /* Try the bytes32 form below. */ }
-  const bytes = Uint8Array.from((hex.slice(0, 64).match(/.{2}/g) || []), (byte) => parseInt(byte, 16));
-  return new TextDecoder().decode(bytes).replace(/\0+$/, '').trim();
-}
-async function getTokenMetadata(networkKey, token) {
-  const [symbolResult, decimalsResult] = await Promise.all([
-    getContractResult(networkKey, token, '0x95d89b41'),
-    getContractResult(networkKey, token, '0x313ce567'),
-  ]);
-  const decimals = Number(BigInt(decimalsResult));
-  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) throw new Error('This token reports decimals outside Tender’s supported range (0–18).');
-  return { symbol: decodeContractString(symbolResult), decimals };
-}
-function matchesTokenTransfer(receipt, record) {
-  if (!receipt || receipt.status !== '0x1' || !isAddress(record?.token) || !isAddress(record?.recipient)) return false;
-  try {
-    const expected = toTokenUnits(record.amount, Number(record.decimals));
-    const recipientTopic = `0x${record.recipient.slice(2).toLowerCase().padStart(64, '0')}`;
-    return (receipt.logs || []).some((log) => log.address?.toLowerCase() === record.token.toLowerCase()
-      && log.topics?.[0]?.toLowerCase() === '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
-      && log.topics?.[2]?.toLowerCase() === recipientTopic
-      && BigInt(log.data || '0x0') === expected);
-  } catch { return false; }
-}
-async function simulateTokenTransfer(provider, tx) {
-  try {
-    const result = await provider.request({ method: 'eth_call', params: [tx, 'latest'] });
-    if (/^0x0{64}$/i.test(result || '')) throw new Error('Token returned false for this transfer.');
-  } catch (error) {
-    const message = error?.message || 'Token transfer simulation failed.';
-    if (/PolicyForbids|TIP[\s-]?403|transfer policy/i.test(message)) throw new Error('The Tempo token policy does not allow this payer or recipient to transfer this token.');
-    if (/paused|ContractPaused/i.test(message)) throw new Error('This token is paused and cannot be transferred right now.');
-    if (/InsufficientBalance/i.test(message)) throw new Error('The connected wallet does not have enough of this token to pay the bounty.');
-    if (/insufficient funds/i.test(message)) throw new Error('The wallet reports insufficient funds for the transfer or its network fee.');
-    throw new Error(`Token transfer simulation failed: ${message}`);
-  }
-}
-async function waitForNetworkReceipt(hash, networkKey) {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    const receipt = await getNetworkReceipt(hash, networkKey);
-    if (receipt) return receipt;
-    await new Promise((resolve) => window.setTimeout(resolve, 3000));
-  }
-  throw new Error(`${getNetwork(networkKey).shortName} has not confirmed the transaction yet: ${hash}`);
-}
 
-async function switchWalletNetwork(provider, network) {
-  const current = await provider.request({ method: 'eth_chainId' });
-  if (current.toLowerCase() === network.chainHex) return;
-  try {
-    await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: network.chainHex }] });
-  } catch (error) {
-    if (error.code !== 4902) throw error;
-    await provider.request({ method: 'wallet_addEthereumChain', params: [{
-      chainId: network.chainHex, chainName: network.name, nativeCurrency: network.nativeCurrency,
-      rpcUrls: [network.rpc], blockExplorerUrls: [network.explorer],
-    }] });
-  }
-  const afterSwitch = await provider.request({ method: 'eth_chainId' });
-  if (afterSwitch.toLowerCase() !== network.chainHex) throw new Error(`Switch your wallet to ${network.name} before continuing.`);
-}
 
-function Icon({ name, size = 18 }) {
-  const shared = { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true };
+function Icon({ name, size = 18, className }) {
+  const shared = { className, width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true };
   const paths = {
     mark: <><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z" /><path d="m4.5 7.8 7.5 4.4 7.5-4.4M12 12.2V21" /></>,
     plus: <><path d="M12 5v14M5 12h14" /></>,
@@ -190,19 +40,22 @@ function Icon({ name, size = 18 }) {
 
 function ReceiptPage({ record }) {
   const network = getNetwork(record?.network);
-  const [verification, setVerification] = useState(record?.txHash ? 'checking' : 'none');
+  const checkable = isCheckableRecord(record);
+  const [verification, setVerification] = useState(!record?.txHash ? 'none' : checkable ? 'checking' : 'failed');
   const [saved, setSaved] = useState(() => Boolean(record?.txHash && readContributorReceipts().some((item) => item.txHash === record.txHash)));
   const [recipientWalletCheck, setRecipientWalletCheck] = useState('idle');
   useEffect(() => {
-    if (!record?.txHash) return;
+    if (!record?.txHash || !checkable) return undefined;
+    let active = true;
     getNetworkReceipt(record.txHash, record.network || 'tempo')
-      .then((receipt) => setVerification(matchesTokenTransfer(receipt, record) ? 'confirmed' : receipt ? 'failed' : 'pending'))
-      .catch(() => setVerification('pending'));
-  }, [record?.txHash, record?.recipient, record?.amount, record?.token, record?.decimals]);
+      .then((receipt) => { if (active) setVerification(matchesTokenTransfer(receipt, record) ? 'confirmed' : receipt ? 'failed' : 'pending'); })
+      .catch(() => { if (active) setVerification('pending'); });
+    return () => { active = false; };
+  }, [record?.txHash, record?.recipient, record?.amount, record?.token, record?.decimals, record?.network]);
   function saveToContributorRecord() {
     const savedReceipts = readContributorReceipts();
     if (!savedReceipts.some((item) => item.txHash === record.txHash)) {
-      localStorage.setItem(CONTRIBUTOR_KEY, JSON.stringify([{ ...record, savedAt: new Date().toISOString() }, ...savedReceipts]));
+      writeStored(CONTRIBUTOR_KEY, [{ ...record, savedAt: new Date().toISOString() }, ...savedReceipts]);
     }
     setSaved(true);
   }
@@ -227,15 +80,15 @@ function ReceiptPage({ record }) {
       <div className="receipt-amount">{record.amount} <span>{record.tokenSymbol || 'token'}</span></div>
       <div className="receipt-lines">
         <div><span>Recipient</span><strong>{shortAddress(record.recipient)}</strong></div>
-        {record.workEvidence?.author && <div><span>GitHub contributor</span><a href={record.workEvidence.authorUrl || `https://github.com/${record.workEvidence.author}`} target="_blank" rel="noreferrer">@{record.workEvidence.author} <Icon name="external" size={13}/></a></div>}
+        {record.workEvidence?.author && <div><span>GitHub contributor</span><a href={safeUrl(record.workEvidence.authorUrl) || `https://github.com/${encodeURIComponent(record.workEvidence.author)}`} target="_blank" rel="noreferrer">@{record.workEvidence.author} <Icon name="external" size={13}/></a></div>}
         <div><span>Work evidence</span>{getEvidenceUrl(record) ? <a href={getEvidenceUrl(record)} target="_blank" rel="noreferrer">Open evidence <Icon name="external" size={14}/></a> : <strong>Not attached</strong>}</div>
         <div><span>Payment date</span><strong>{displayDate(record.paidAt)}</strong></div>
         <div><span>Network</span><strong>{network.name}</strong></div>
         <div><span>Token contract</span><strong>{shortAddress(record.token)}</strong></div>
-        <div><span>On-chain status</span><strong className={verification === 'confirmed' ? 'positive' : ''}>{verification === 'checking' ? 'Checking token transfer…' : verification === 'confirmed' ? 'Transfer verified' : verification === 'failed' ? 'Transfer details do not match' : verification === 'pending' ? 'Not confirmed yet' : 'No transaction attached'}</strong></div>
+        <div><span>On-chain status</span><strong className={verification === 'confirmed' ? 'positive' : ''}>{verification === 'checking' ? 'Checking token transfer…' : verification === 'confirmed' ? 'Transfer verified' : verification === 'failed' ? (checkable ? 'Transfer details do not match' : 'Receipt details are incomplete or invalid') : verification === 'pending' ? 'Not confirmed yet' : 'No transaction attached'}</strong></div>
       </div>
       <div className="recipient-wallet-check"><button className="secondary-button" onClick={checkRecipientWallet}><Icon name="wallet" size={14}/> Check my connected wallet</button><span className={recipientWalletCheck}>{recipientWalletCheck === 'match' ? 'This connected wallet matches the recipient.' : recipientWalletCheck === 'mismatch' ? 'This connected wallet is different from the recipient address.' : recipientWalletCheck === 'unavailable' ? 'No compatible wallet was found in this browser.' : recipientWalletCheck === 'cancelled' ? 'Wallet connection was cancelled.' : recipientWalletCheck === 'checking' ? 'Checking wallet address…' : 'Optional: confirm this receipt is addressed to your wallet.'}</span></div>
-      {record.txHash && <a className="explorer-link" href={`${network.explorer}/tx/${record.txHash}`} target="_blank" rel="noreferrer">Open transaction in {network.explorerName} <Icon name="external" size={15}/></a>}
+      {isTxHash(record.txHash) && <a className="explorer-link" href={`${network.explorer}/tx/${record.txHash}`} target="_blank" rel="noreferrer">Open transaction in {network.explorerName} <Icon name="external" size={15}/></a>}
       {verification === 'confirmed' && <button className="primary-button receipt-save" onClick={saveToContributorRecord}>{saved ? 'Saved to your contributor record' : 'Save to my contributor record'}</button>}
       <p className="receipt-note">Tender checks the transaction receipt for a matching token, recipient, and amount. Save verified work to your local contributor record.</p>
     </div>
@@ -250,6 +103,7 @@ function App() {
   const receiptData = new URLSearchParams(window.location.search).get('receipt');
   const sharedRecord = receiptData ? decodeShare(receiptData) : null;
   const [records, setRecords] = useState(readRecords);
+  const [query, setQuery] = useState('');
   const [contributorReceipts, setContributorReceipts] = useState(readContributorReceipts);
   const [receiptChecks, setReceiptChecks] = useState({});
   const [view, setView] = useState('team');
@@ -261,11 +115,18 @@ function App() {
   const [notice, setNotice] = useState('');
   const [prDetails, setPrDetails] = useState({});
   const [reviewed, setReviewed] = useState(false);
-  const [form, setForm] = useState({ program: '', workType: 'bounty', milestone: '', recipient: '', amount: '', token: '', tokenSymbol: '', decimals: '6', evidenceUrl: '', network: 'tempo' });
+  const [form, setForm] = useState(EMPTY_FORM);
   const [tokenLookup, setTokenLookup] = useState({ status: 'idle', message: '' });
 
-  useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(records)); }, [records]);
-  useEffect(() => { localStorage.setItem(CONTRIBUTOR_KEY, JSON.stringify(contributorReceipts)); }, [contributorReceipts]);
+  useEffect(() => { writeStored(STORAGE_KEY, records); }, [records]);
+  useEffect(() => { writeStored(CONTRIBUTOR_KEY, contributorReceipts); }, [contributorReceipts]);
+  useEffect(() => {
+    const provider = getProvider();
+    if (!provider?.on) return undefined;
+    const onAccounts = (accounts) => setWallet(accounts?.[0] || '');
+    provider.on('accountsChanged', onAccounts);
+    return () => provider.removeListener?.('accountsChanged', onAccounts);
+  }, []);
   useEffect(() => {
     if (!isAddress(form.token)) { setTokenLookup({ status: 'idle', message: '' }); return undefined; }
     let active = true;
@@ -286,6 +147,7 @@ function App() {
   useEffect(() => {
     let active = true;
     contributorReceipts.forEach((item) => {
+      if (!isCheckableRecord(item)) { setReceiptChecks((current) => ({ ...current, [item.txHash]: 'unverified' })); return; }
       setReceiptChecks((current) => ({ ...current, [item.txHash]: 'checking' }));
       getNetworkReceipt(item.txHash, item.network || 'tempo')
         .then((receipt) => { if (active) setReceiptChecks((current) => ({ ...current, [item.txHash]: matchesTokenTransfer(receipt, item) ? 'verified' : 'unverified' })); })
@@ -299,6 +161,10 @@ function App() {
   const selected = records.find((item) => item.id === selectedId) || null;
   const selectedNetwork = getNetwork(selected?.network);
   const pendingCount = records.filter((item) => item.status !== 'paid').length;
+  const visibleRecords = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return needle ? records.filter((item) => [item.milestone, item.program, item.recipient, item.evidenceUrl, item.tokenSymbol].some((value) => String(value || '').toLowerCase().includes(needle))) : records;
+  }, [records, query]);
   const paidCount = records.filter((item) => item.status === 'paid').length;
   const networksUsed = useMemo(() => new Set(records.map((item) => item.network || 'tempo')).size, [records]);
 
@@ -326,12 +192,33 @@ function App() {
     }
     setBusy(`evidence-${record.id}`); setNotice(''); setReviewed(false);
     try {
-      const response = await fetch(`https://api.github.com/repos/${parsed.owner}/${parsed.repo}/pulls/${parsed.number}`, { headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2026-03-10' } });
-      if (!response.ok) throw new Error(response.status === 404 ? 'Pull request not found. Check that the repository is public and the URL is correct.' : response.status === 403 ? 'GitHub rate limit reached. Try again in a few minutes.' : `GitHub returned ${response.status}.`);
+      const response = await fetch(`https://api.github.com/repos/${parsed.owner}/${parsed.repo}/pulls/${parsed.number}`, { headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } });
+      if (!response.ok) throw new Error(response.status === 404 ? 'Pull request not found. Check that the repository is public and the URL is correct.' : response.status === 403 || response.status === 429 ? 'GitHub rate limit reached. Try again in a few minutes.' : `GitHub returned ${response.status}.`);
       const pr = await response.json();
-      setPrDetails((current) => ({ ...current, [record.id]: { kind: 'github_pr', checked: true, title: pr.title, merged: Boolean(pr.merged), mergedAt: pr.merged_at, author: pr.user?.login, authorUrl: pr.user?.html_url, authorAvatar: pr.user?.avatar_url, url: pr.html_url, base: pr.base?.repo?.full_name, head: pr.head?.ref, baseBranch: pr.base?.ref, additions: pr.additions, deletions: pr.deletions, changedFiles: pr.changed_files } }));
+      setPrDetails((current) => ({ ...current, [record.id]: { kind: 'github_pr', checked: true, title: pr.title, merged: Boolean(pr.merged), mergedAt: pr.merged_at, author: pr.user?.login, authorUrl: pr.user?.html_url, url: pr.html_url, base: pr.base?.repo?.full_name, head: pr.head?.ref, baseBranch: pr.base?.ref, additions: pr.additions, deletions: pr.deletions, changedFiles: pr.changed_files } }));
       setNotice(pr.merged ? 'GitHub confirms this pull request was merged. Review the work before approving payment.' : 'This pull request is not merged yet. Tender will not enable payment.');
     } catch (error) { setNotice(error.message || 'Could not check the pull request.'); }
+    finally { setBusy(''); }
+  }
+
+  async function finalizePayment(record, txHash, evidence) {
+    const network = getNetwork(record.network);
+    try {
+      const receipt = await waitForNetworkReceipt(txHash, record.network || 'tempo');
+      if (!matchesTokenTransfer(receipt, record)) {
+        const reverted = receipt.status !== '0x1';
+        setRecords((current) => current.map((item) => item.id === record.id ? { ...item, status: 'review', txHash: undefined, submittedAt: undefined } : item));
+        throw new Error(reverted ? `The transaction was reverted on ${network.shortName}, so no funds moved. You can try again. ${txHash}` : `The confirmed transaction did not emit the expected token, recipient, and amount. Check it in the explorer: ${txHash}`);
+      }
+      const paidAt = new Date().toISOString();
+      setRecords((current) => current.map((item) => item.id === record.id ? { ...item, status: 'paid', txHash, paidAt, reviewedAt: item.reviewedAt || paidAt, workEvidence: evidence || item.workEvidence } : item));
+      setReviewed(false); setNotice(`Payment confirmed on ${network.shortName}. The payout receipt is ready to share.`);
+    } catch (error) { setNotice(error.message || 'Payment could not be confirmed.'); }
+  }
+
+  async function recheckSubmitted(record) {
+    setBusy(`pay-${record.id}`); setNotice(`Checking ${getNetwork(record.network).shortName} for confirmation…`);
+    try { await finalizePayment(record, record.txHash, record.workEvidence); }
     finally { setBusy(''); }
   }
 
@@ -345,9 +232,11 @@ function App() {
     try { if (toTokenUnits(form.amount, decimals) <= 0n) return setFormError('Enter a payment amount greater than zero.'); }
     catch (error) { return setFormError(error.message); }
     if (!parsePrUrl(form.evidenceUrl)) return setFormError('Enter a public GitHub pull request URL. Tender uses the merged PR as the work record.');
-    const record = { id: crypto.randomUUID(), ...form, decimals, status: 'review', createdAt: new Date().toISOString() };
+    const duplicate = records.find((item) => prKey(item.evidenceUrl) === prKey(form.evidenceUrl) && item.recipient?.toLowerCase() === form.recipient.toLowerCase());
+    if (duplicate) return setFormError(`A payout to this wallet for this pull request already exists (“${duplicate.milestone}”). Open it instead of paying twice.`);
+    const record = { id: crypto.randomUUID(), ...form, program: form.program.trim(), milestone: form.milestone.trim(), evidenceUrl: form.evidenceUrl.trim(), decimals, status: 'review', createdAt: new Date().toISOString() };
     setRecords((current) => [record, ...current]); setSelectedId(record.id); setDialogOpen(false); setReviewed(false); setPrDetails({});
-    setForm({ program: '', workType: 'bounty', milestone: '', recipient: '', amount: '', token: '', tokenSymbol: '', decimals: '6', evidenceUrl: '', network: 'tempo' });
+    setForm(EMPTY_FORM);
     setNotice('Bounty payout created. Check the merged PR, review the work, then pay the contributor.');
   }
 
@@ -355,6 +244,7 @@ function App() {
     const provider = getProvider();
     const network = getNetwork(record.network);
     if (!provider) { setNotice('Install an EVM wallet such as MetaMask to make a testnet payment.'); return; }
+    if (record.status !== 'review') { setNotice('This payout has already been sent.'); return; }
     const detail = prDetails[record.id];
     if (!detail?.checked || (detail.kind === 'github_pr' && !detail.merged) || !reviewed) { setNotice('Review the work evidence and approve it before paying. GitHub pull requests must be merged.'); return; }
     if (!isAddress(record.recipient) || !isAddress(record.token)) { setNotice('The recipient or token contract address is invalid.'); return; }
@@ -370,12 +260,11 @@ function App() {
       setNotice('Checking token balance and transfer rules…');
       await simulateTokenTransfer(provider, transaction);
       const txHash = await provider.request({ method: 'eth_sendTransaction', params: [transaction] });
+      // Persist the hash right away: if the tab closes before confirmation, the payment is still tracked and can be rechecked.
+      const submitted = { ...record, status: 'submitted', txHash, reviewer: account, reviewedAt: new Date().toISOString(), submittedAt: new Date().toISOString(), workEvidence: detail };
+      setRecords((current) => current.map((item) => item.id === record.id ? submitted : item));
       setNotice(`Transaction submitted. Waiting for ${network.shortName} confirmation…`);
-      const receipt = await waitForNetworkReceipt(txHash, record.network || 'tempo');
-      if (!matchesTokenTransfer(receipt, record)) throw new Error(`The confirmed transaction did not emit the expected token, recipient, and amount. Check it in the explorer: ${txHash}`);
-      const paidAt = new Date().toISOString();
-      setRecords((current) => current.map((item) => item.id === record.id ? { ...item, status: 'paid', txHash, paidAt, reviewer: account, reviewedAt: paidAt, workEvidence: detail } : item));
-      setReviewed(false); setNotice(`Payment confirmed on ${network.shortName}. The payout receipt is ready to share.`);
+      await finalizePayment(submitted, txHash, detail);
     } catch (error) { setNotice(error.message || 'Payment could not be completed.'); }
     finally { setBusy(''); }
   }
@@ -395,18 +284,18 @@ function App() {
     const network = getNetwork(record.network);
     const payload = { product: 'Tender', version: 1, organization: record.program, workType: record.workType || 'bounty', deliverable: record.milestone, recipient: record.recipient, amount: record.amount, token: record.token, tokenSymbol: record.tokenSymbol || null, tokenDecimals: record.decimals, evidenceUrl: getEvidenceUrl(record), workEvidence: evidence, reviewer: record.reviewer || null, reviewedAt: record.reviewedAt || null, txHash: record.txHash || null, paidAt: record.paidAt || null, network: network.name, chainId: network.id, recordCreatedAt: record.createdAt };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-    const anchor = document.createElement('a'); anchor.href = URL.createObjectURL(blob); anchor.download = `tender-${record.milestone.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-payout.json`; anchor.click(); URL.revokeObjectURL(anchor.href);
+    const anchor = document.createElement('a'); anchor.href = URL.createObjectURL(blob); anchor.download = `tender-${String(record.milestone || 'work').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60)}-payout.json`; document.body.appendChild(anchor); anchor.click(); anchor.remove(); window.setTimeout(() => URL.revokeObjectURL(anchor.href), 1000);
   }
 
-  const currentEvidence = selected ? prDetails[selected.id] : null;
+  const currentEvidence = selected ? (prDetails[selected.id] || (selected.status !== 'review' ? selected.workEvidence : null)) : null;
   return <div className="app-shell">
     <aside className="sidebar">
       <Brand />
-      <div className="workspace-switch"><div className="workspace-avatar">{records[0]?.program?.[0]?.toUpperCase() || 'T'}</div><div><strong>{records[0]?.program || 'Tender'}</strong><span>Open-source payouts</span></div><span className="switch-chevron">⌄</span></div>
+      <div className="workspace-switch"><div className="workspace-avatar">{records[0]?.program?.[0]?.toUpperCase() || 'T'}</div><div><strong>{records[0]?.program || 'Tender'}</strong><span>Open-source payouts</span></div></div>
       <p className="nav-label">WORKSPACE</p>
       <button className={`nav-item ${view === 'team' ? 'active' : ''}`} onClick={() => setView('team')}><span className="nav-icon"><Icon name="file"/></span>Bounty payouts<span className="nav-count">{records.length}</span></button>
       <button className={`nav-item ${view === 'contributor' ? 'active' : ''}`} onClick={() => setView('contributor')}><span className="nav-icon"><Icon name="wallet"/></span>My work record<span className="nav-count">{contributorReceipts.length}</span></button>
-      <div className="sidebar-bottom"><div className="network-indicator"><span className="network-dot"/><div><strong>{selectedNetwork.name}</strong><span>Test network</span></div></div><div className="profile-row"><div className="profile-avatar">{wallet ? wallet.slice(2, 4).toUpperCase() : 'DW'}</div><div className="profile-copy"><strong>{wallet ? shortAddress(wallet) : 'Payer wallet'}</strong><span>{wallet ? 'Wallet connected' : 'Connect wallet to pay'}</span></div><button className="tiny-menu" aria-label="Account menu">···</button></div></div>
+      <div className="sidebar-bottom"><div className="network-indicator"><span className="network-dot"/><div><strong>{selectedNetwork.name}</strong><span>Test network</span></div></div><div className="profile-row"><div className="profile-avatar">{wallet ? wallet.slice(2, 4).toUpperCase() : 'DW'}</div><div className="profile-copy"><strong>{wallet ? shortAddress(wallet) : 'Payer wallet'}</strong><span>{wallet ? 'Wallet connected' : 'Connect wallet to pay'}</span></div></div></div>
     </aside>
 
     <main className="main-area">
@@ -425,18 +314,18 @@ function App() {
         </section>
         <section className="workspace-grid">
           <div className="list-panel">
-            <div className="panel-heading"><div><h2>Contributor work</h2><p>Deliverables, approval, and payout status</p></div><button className="filter-button" aria-label="Search payouts" onClick={() => setNotice('Search is coming soon.')}><Icon name="search" size={17}/></button></div>
-            {records.length === 0 ? <div className="empty-state"><div className="empty-icon"><Icon name="file" size={23}/></div><h3>No bounty payouts yet</h3><p>Start with a contributor’s public pull request. Tender checks merge status before you review and pay.</p><button className="secondary-button" onClick={() => setDialogOpen(true)}><Icon name="plus" size={16}/> Add the first bounty</button></div> : <div className="milestone-list">{records.map((item) => <button key={item.id} className={`milestone-row ${selectedId === item.id ? 'selected' : ''}`} onClick={() => { setSelectedId(item.id); setNotice(''); setReviewed(false); }}><span className={`row-status ${item.status === 'paid' ? 'done' : ''}`}>{item.status === 'paid' ? <Icon name="check" size={14}/> : <span/>}</span><span className="row-main"><strong>{item.milestone}</strong><span>{getWorkType(item.workType)} · {getNetwork(item.network).shortName} · {item.program}</span></span><span className="row-amount">{item.amount}</span><span className={`status-pill ${item.status === 'paid' ? 'paid' : 'needs-review'}`}>{item.status === 'paid' ? 'Paid' : 'Needs review'}</span><Icon className="row-arrow" name="arrow" size={16}/></button>)}</div>}
+            <div className="panel-heading"><div><h2>Contributor work</h2><p>Deliverables, approval, and payout status</p></div><label className="list-search"><Icon name="search" size={16}/><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search payouts" aria-label="Search payouts"/></label></div>
+            {records.length > 0 && visibleRecords.length === 0 ? <div className="empty-state"><h3>No matching payouts</h3><p>Nothing matches “{query}”.</p><button className="secondary-button" onClick={() => setQuery('')}>Clear search</button></div> : records.length === 0 ? <div className="empty-state"><div className="empty-icon"><Icon name="file" size={23}/></div><h3>No bounty payouts yet</h3><p>Start with a contributor’s public pull request. Tender checks merge status before you review and pay.</p><button className="secondary-button" onClick={() => setDialogOpen(true)}><Icon name="plus" size={16}/> Add the first bounty</button></div> : <div className="milestone-list">{visibleRecords.map((item) => <button key={item.id} className={`milestone-row ${selectedId === item.id ? 'selected' : ''}`} onClick={() => { setSelectedId(item.id); setNotice(''); setReviewed(false); }}><span className={`row-status ${item.status === 'paid' ? 'done' : ''}`}>{item.status === 'paid' ? <Icon name="check" size={14}/> : <span/>}</span><span className="row-main"><strong>{item.milestone}</strong><span>{getWorkType(item.workType)} · {getNetwork(item.network).shortName} · {item.program}</span></span><span className="row-amount">{item.amount}</span><span className={`status-pill ${item.status === 'paid' ? 'paid' : 'needs-review'}`}>{item.status === 'paid' ? 'Paid' : item.status === 'submitted' ? 'Confirming' : 'Needs review'}</span><Icon className="row-arrow" name="arrow" size={16}/></button>)}</div>}
             <div className="panel-footer"><span>{records.length} {records.length === 1 ? 'bounty' : 'bounties'}</span><span>Team records saved in this browser</span></div>
           </div>
 
           <section className="detail-panel">
             {selected ? <>
-              <div className="detail-head"><div><p className="eyebrow">PAYOUT DETAILS</p><h2>{selected.milestone}</h2><p>{selected.program} · {getWorkType(selected.workType)}</p></div><span className={`status-pill ${selected.status === 'paid' ? 'paid' : 'needs-review'}`}>{selected.status === 'paid' ? 'Paid' : 'Needs review'}</span></div>
+              <div className="detail-head"><div><p className="eyebrow">PAYOUT DETAILS</p><h2>{selected.milestone}</h2><p>{selected.program} · {getWorkType(selected.workType)}</p></div><span className={`status-pill ${selected.status === 'paid' ? 'paid' : 'needs-review'}`}>{selected.status === 'paid' ? 'Paid' : selected.status === 'submitted' ? 'Confirming' : 'Needs review'}</span></div>
               <div className="detail-amount"><span>Work payout</span><strong>{selected.amount} {selected.tokenSymbol || ''}</strong><small>{selectedNetwork.name} · {shortAddress(selected.token)}</small></div>
-              <div className="detail-section"><div className="section-title"><h3>Recipient</h3><button className="copy-text" onClick={() => navigator.clipboard?.writeText(selected.recipient).then(() => setNotice('Recipient address copied.'))}>Copy address</button></div><a className="address-card" href={`${selectedNetwork.explorer}/address/${selected.recipient}`} target="_blank" rel="noreferrer"><span className="address-avatar">{selected.recipient.slice(2, 4).toUpperCase()}</span><span><strong>{shortAddress(selected.recipient)}</strong><small>View wallet on {selectedNetwork.shortName} <Icon name="external" size={12}/></small></span><Icon name="external" size={15}/></a></div>
-              <div className="detail-section"><div className="section-title"><h3>Work evidence</h3><span className={`evidence-state ${currentEvidence?.checked ? 'confirmed' : ''}`}><span/> {currentEvidence?.kind === 'github_pr' ? (currentEvidence.merged ? 'Merged pull request' : 'Not merged') : currentEvidence?.checked ? 'Link ready' : 'Not reviewed'}</span></div><a className="evidence-card" href={getEvidenceUrl(selected)} target="_blank" rel="noreferrer"><span className="github-mark">{parsePrUrl(getEvidenceUrl(selected)) ? 'GH' : '↗'}</span><span className="evidence-copy"><strong>{currentEvidence?.title || (parsePrUrl(getEvidenceUrl(selected)) ? parsePrUrl(getEvidenceUrl(selected)).repo : 'Supporting evidence')}</strong><small>{getEvidenceUrl(selected).replace('https://', '')}</small></span><Icon name="external" size={15}/></a><button className="check-pr-button" disabled={busy === `evidence-${selected.id}`} onClick={() => checkEvidence(selected)}><Icon name="search" size={15}/>{busy === `evidence-${selected.id}` ? 'Checking GitHub…' : 'Review evidence link'}</button>{currentEvidence?.kind === 'github_pr' && currentEvidence.merged && <div className="pr-meta"><span><Icon name="check" size={14}/> Merged {displayDate(currentEvidence.mergedAt)}</span>{currentEvidence.author && <a href={currentEvidence.authorUrl || `https://github.com/${currentEvidence.author}`} target="_blank" rel="noreferrer">by @{currentEvidence.author} <Icon name="external" size={12}/></a>}<span>{currentEvidence.changedFiles ?? '—'} files · +{currentEvidence.additions ?? '—'} / −{currentEvidence.deletions ?? '—'}</span></div>}</div>
-              {selected.status === 'paid' ? <div className="paid-card"><div className="paid-heading"><span className="paid-check"><Icon name="check" size={17}/></span><div><strong>Payment confirmed</strong><small>{displayDate(selected.paidAt)} · {selectedNetwork.name}</small></div></div><a className="tx-link" href={`${selectedNetwork.explorer}/tx/${selected.txHash}`} target="_blank" rel="noreferrer">{shortAddress(selected.txHash)} <Icon name="external" size={14}/></a><div className="receipt-actions"><button className="secondary-button" onClick={() => shareReceipt(selected)}>Share recipient receipt</button><button className="icon-action" title="Download payout record" onClick={() => downloadReceipt(selected)}><Icon name="file" size={17}/></button></div></div> : <div className="approval-box"><div className="approval-title"><span className="step-index">1</span><div><strong>Review and release</strong><small>Confirm the work before sending funds.</small></div></div>{currentEvidence?.checked && (currentEvidence.kind !== 'github_pr' || currentEvidence.merged) ? <label className="review-check"><input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)}/><span>I reviewed the merged change{currentEvidence.author ? ` by @${currentEvidence.author}` : ''} and confirmed this payout address with the contributor.</span></label> : <p className="review-hint">Review the evidence link first. GitHub pull requests must be merged.</p>}<button className="pay-button" disabled={!currentEvidence?.checked || (currentEvidence.kind === 'github_pr' && !currentEvidence.merged) || !reviewed || Boolean(busy)} onClick={() => payMilestone(selected)}>{busy === `pay-${selected.id}` ? 'Checking and sending…' : <><Icon name="wallet" size={16}/> Pay {selected.amount} {selected.tokenSymbol || ''} on {selectedNetwork.shortName}</>}</button><p className="pay-footnote">Tender simulates the token transfer first. Your wallet signs only after the preflight succeeds.</p></div>}
+              <div className="detail-section"><div className="section-title"><h3>Recipient</h3><button className="copy-text" onClick={() => navigator.clipboard?.writeText(selected.recipient).then(() => setNotice('Recipient address copied.'), () => setNotice(selected.recipient))}>Copy address</button></div><a className="address-card" href={`${selectedNetwork.explorer}/address/${selected.recipient}`} target="_blank" rel="noreferrer"><span className="address-avatar">{selected.recipient.slice(2, 4).toUpperCase()}</span><span><strong>{shortAddress(selected.recipient)}</strong><small>View wallet on {selectedNetwork.shortName} <Icon name="external" size={12}/></small></span><Icon name="external" size={15}/></a></div>
+              <div className="detail-section"><div className="section-title"><h3>Work evidence</h3><span className={`evidence-state ${currentEvidence?.checked ? 'confirmed' : ''}`}><span/> {currentEvidence?.kind === 'github_pr' ? (currentEvidence.merged ? 'Merged pull request' : 'Not merged') : currentEvidence?.checked ? 'Link ready' : 'Not reviewed'}</span></div><a className="evidence-card" href={getEvidenceUrl(selected)} target="_blank" rel="noreferrer"><span className="github-mark">{parsePrUrl(getEvidenceUrl(selected)) ? 'GH' : '↗'}</span><span className="evidence-copy"><strong>{currentEvidence?.title || (parsePrUrl(getEvidenceUrl(selected)) ? parsePrUrl(getEvidenceUrl(selected)).repo : 'Supporting evidence')}</strong><small>{getEvidenceUrl(selected).replace('https://', '')}</small></span><Icon name="external" size={15}/></a><button className="check-pr-button" disabled={busy === `evidence-${selected.id}`} onClick={() => checkEvidence(selected)}><Icon name="search" size={15}/>{busy === `evidence-${selected.id}` ? 'Checking GitHub…' : 'Review evidence link'}</button>{currentEvidence?.kind === 'github_pr' && currentEvidence.merged && <div className="pr-meta"><span><Icon name="check" size={14}/> Merged {displayDate(currentEvidence.mergedAt)}</span>{currentEvidence.author && <a href={safeUrl(currentEvidence.authorUrl) || `https://github.com/${encodeURIComponent(currentEvidence.author)}`} target="_blank" rel="noreferrer">by @{currentEvidence.author} <Icon name="external" size={12}/></a>}<span>{currentEvidence.changedFiles ?? '—'} files · +{currentEvidence.additions ?? '—'} / −{currentEvidence.deletions ?? '—'}</span></div>}</div>
+              {selected.status === 'paid' ? <div className="paid-card"><div className="paid-heading"><span className="paid-check"><Icon name="check" size={17}/></span><div><strong>Payment confirmed</strong><small>{displayDate(selected.paidAt)} · {selectedNetwork.name}</small></div></div>{isTxHash(selected.txHash) && <a className="tx-link" href={`${selectedNetwork.explorer}/tx/${selected.txHash}`} target="_blank" rel="noreferrer">{shortAddress(selected.txHash)} <Icon name="external" size={14}/></a>}<div className="receipt-actions"><button className="secondary-button" onClick={() => shareReceipt(selected)}>Share recipient receipt</button><button className="icon-action" title="Download payout record" onClick={() => downloadReceipt(selected)}><Icon name="file" size={17}/></button></div></div> : selected.status === 'submitted' ? <div className="approval-box"><div className="approval-title"><span className="step-index"><Icon name="clock" size={14}/></span><div><strong>Waiting for confirmation</strong><small>The transfer was sent from your wallet. Funds may already have moved, so do not pay again.</small></div></div>{isTxHash(selected.txHash) && <a className="tx-link" href={`${selectedNetwork.explorer}/tx/${selected.txHash}`} target="_blank" rel="noreferrer">{shortAddress(selected.txHash)} <Icon name="external" size={14}/></a>}<button className="pay-button" disabled={Boolean(busy)} onClick={() => recheckSubmitted(selected)}>{busy === `pay-${selected.id}` ? 'Checking network…' : 'Check confirmation'}</button></div> : <div className="approval-box"><div className="approval-title"><span className="step-index">1</span><div><strong>Review and release</strong><small>Confirm the work before sending funds.</small></div></div>{currentEvidence?.checked && (currentEvidence.kind !== 'github_pr' || currentEvidence.merged) ? <label className="review-check"><input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)}/><span>I reviewed the merged change{currentEvidence.author ? ` by @${currentEvidence.author}` : ''} and confirmed this payout address with the contributor.</span></label> : <p className="review-hint">Review the evidence link first. GitHub pull requests must be merged.</p>}<button className="pay-button" disabled={!currentEvidence?.checked || (currentEvidence.kind === 'github_pr' && !currentEvidence.merged) || !reviewed || Boolean(busy)} onClick={() => payMilestone(selected)}>{busy === `pay-${selected.id}` ? 'Checking and sending…' : <><Icon name="wallet" size={16}/> Pay {selected.amount} {selected.tokenSymbol || ''} on {selectedNetwork.shortName}</>}</button><p className="pay-footnote">Tender simulates the token transfer first. Your wallet signs only after the preflight succeeds.</p></div>}
               <div className="record-meta"><span>Created {displayDate(selected.createdAt)}</span><span>Chain ID {selectedNetwork.id}</span></div>
             </> : <div className="detail-empty"><div className="detail-empty-icon"><Icon name="arrow" size={21}/></div><h3>Select a payout</h3><p>Choose a work item to review its evidence and payment details.</p></div>}
           </section>

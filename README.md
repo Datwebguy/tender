@@ -33,7 +33,7 @@ npm install
 npm run dev
 ```
 
-Build the production bundle with `npm run build`.
+Build the production bundle with `npm run build`. Run the unit tests for the amount, receipt-matching, and share-link helpers with `npm test`.
 
 ## Current limits
 
@@ -45,5 +45,7 @@ Build the production bundle with `npm run build`.
 - Token metadata reads and transfer simulations use the selected network's RPC. Metadata calls are best-effort; the payer can enter decimals manually if the contract does not expose standard metadata.
 - The contributor's saved record is a convenience view over receipt links, not a credential or identity service. Receipts can be rechecked against the chain, but the local list itself is editable and browser-bound.
 - Receipt links encode the payout record in their URL. Anyone with the link can view it; avoid adding confidential data.
+- A sent transfer is saved as **Confirming** as soon as the wallet returns its hash, so closing the tab mid-payment does not lose it; reopen the payout and use **Check confirmation**. Tender also blocks a second payout to the same wallet for the same pull request.
+- Receipt links carry only the fields a receipt needs (not the reviewer wallet or internal ids). Receipt fields are untrusted: links and numbers are validated before use, and only the token, recipient, amount, and status are proven by the chain. Title, team name, and date are whatever the link's creator wrote.
 - Transfers are sent directly from the payer's wallet. Tender does not hold funds, escrow, schedule, or reverse a transfer.
 - Token contracts and decimal precision are entered by the payer and should be checked before payment.
