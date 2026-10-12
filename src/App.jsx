@@ -3,7 +3,7 @@ const NETWORKS = {
   tempo: {
     id: 42431, chainHex: '0xa5bf', name: 'Tempo Moderato', shortName: 'Tempo',
     nativeCurrency: { name: 'USD', symbol: 'USD', decimals: 18 },
-    rpc: 'https://rpc.moderato.tempo.xyz', explorer: 'https://explore.tempo.xyz',
+    rpc: 'https://rpc.moderato.tempo.xyz', explorer: 'https://explore.tempo.xyz', faucet: 'https://tempo.xyz/developers/docs/quickstart/faucet',
     explorerName: 'Tempo Explorer', testnet: true,
   },
   robinhood: {
@@ -40,7 +40,10 @@ function parsePrUrl(value) {
   const match = value.trim().match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/.*)?$/i);
   return match ? { owner: match[1], repo: match[2], number: match[3] } : null;
 }
-function getEvidenceUrl(record) { return record?.evidenceUrl || record?.prUrl || ''; }
+function getEvidenceUrl(record) {
+  const value = record?.evidenceUrl || record?.prUrl || '';
+  return isWebUrl(value) ? value : '';
+}
 function isWebUrl(value) {
   try { const url = new URL(value); return url.protocol === 'https:' || url.protocol === 'http:'; }
   catch { return false; }
@@ -81,6 +84,44 @@ async function getNetworkReceipt(hash, networkKey = 'tempo') {
   if (result.error) throw new Error(result.error.message || `${network.shortName} RPC error.`);
   return result.result;
 }
+async function getContractResult(networkKey, to, data) {
+  const network = getNetwork(networkKey);
+  const response = await fetch(network.rpc, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to, data }, 'latest'] }),
+  });
+  if (!response.ok) throw new Error(`${network.shortName} RPC returned ${response.status}.`);
+  const result = await response.json();
+  if (result.error) throw new Error(result.error.message || 'Token contract read failed.');
+  if (!result.result || result.result === '0x') throw new Error('Token contract did not return the requested value.');
+  return result.result;
+}
+function decodeContractString(value) {
+  const hex = value.replace(/^0x/, '');
+  const readWord = (offset) => BigInt(`0x${hex.slice(offset, offset + 64)}`);
+  try {
+    const offset = Number(readWord(0)) * 2;
+    if (Number.isSafeInteger(offset) && offset >= 64 && offset + 64 <= hex.length) {
+      const length = Number(readWord(offset));
+      const start = offset + 64;
+      if (Number.isSafeInteger(length) && length >= 0 && start + length * 2 <= hex.length) {
+        const bytes = Uint8Array.from(hex.slice(start, start + length * 2).match(/.{2}/g) || [], (byte) => parseInt(byte, 16));
+        return new TextDecoder().decode(bytes).replace(/\0+$/, '').trim();
+      }
+    }
+  } catch { /* Try the bytes32 form below. */ }
+  const bytes = Uint8Array.from((hex.slice(0, 64).match(/.{2}/g) || []), (byte) => parseInt(byte, 16));
+  return new TextDecoder().decode(bytes).replace(/\0+$/, '').trim();
+}
+async function getTokenMetadata(networkKey, token) {
+  const [symbolResult, decimalsResult] = await Promise.all([
+    getContractResult(networkKey, token, '0x95d89b41'),
+    getContractResult(networkKey, token, '0x313ce567'),
+  ]);
+  const decimals = Number(BigInt(decimalsResult));
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) throw new Error('This token reports decimals outside Tender’s supported range (0–18).');
+  return { symbol: decodeContractString(symbolResult), decimals };
+}
 function matchesTokenTransfer(receipt, record) {
   if (!receipt || receipt.status !== '0x1' || !isAddress(record?.token) || !isAddress(record?.recipient)) return false;
   try {
@@ -91,6 +132,19 @@ function matchesTokenTransfer(receipt, record) {
       && log.topics?.[2]?.toLowerCase() === recipientTopic
       && BigInt(log.data || '0x0') === expected);
   } catch { return false; }
+}
+async function simulateTokenTransfer(provider, tx) {
+  try {
+    const result = await provider.request({ method: 'eth_call', params: [tx, 'latest'] });
+    if (/^0x0{64}$/i.test(result || '')) throw new Error('Token returned false for this transfer.');
+  } catch (error) {
+    const message = error?.message || 'Token transfer simulation failed.';
+    if (/PolicyForbids|TIP[\s-]?403|transfer policy/i.test(message)) throw new Error('The Tempo token policy does not allow this payer or recipient to transfer this token.');
+    if (/paused|ContractPaused/i.test(message)) throw new Error('This token is paused and cannot be transferred right now.');
+    if (/InsufficientBalance/i.test(message)) throw new Error('The connected wallet does not have enough of this token to pay the bounty.');
+    if (/insufficient funds/i.test(message)) throw new Error('The wallet reports insufficient funds for the transfer or its network fee.');
+    throw new Error(`Token transfer simulation failed: ${message}`);
+  }
 }
 async function waitForNetworkReceipt(hash, networkKey) {
   for (let attempt = 0; attempt < 40; attempt += 1) {
@@ -138,6 +192,7 @@ function ReceiptPage({ record }) {
   const network = getNetwork(record?.network);
   const [verification, setVerification] = useState(record?.txHash ? 'checking' : 'none');
   const [saved, setSaved] = useState(() => Boolean(record?.txHash && readContributorReceipts().some((item) => item.txHash === record.txHash)));
+  const [recipientWalletCheck, setRecipientWalletCheck] = useState('idle');
   useEffect(() => {
     if (!record?.txHash) return;
     getNetworkReceipt(record.txHash, record.network || 'tempo')
@@ -151,6 +206,16 @@ function ReceiptPage({ record }) {
     }
     setSaved(true);
   }
+  async function checkRecipientWallet() {
+    const provider = getProvider();
+    if (!provider) { setRecipientWalletCheck('unavailable'); return; }
+    setRecipientWalletCheck('checking');
+    try {
+      const accounts = await provider.request({ method: 'eth_requestAccounts' });
+      const account = accounts?.[0] || '';
+      setRecipientWalletCheck(account.toLowerCase() === record.recipient?.toLowerCase() ? 'match' : 'mismatch');
+    } catch { setRecipientWalletCheck('cancelled'); }
+  }
   if (!record) return <main className="receipt-page"><div className="receipt-card"><Brand /><h1>Receipt not found</h1><p>This link may be incomplete. Ask the payer to send it again.</p></div></main>;
   return <main className="receipt-page">
     <div className="receipt-card">
@@ -159,15 +224,17 @@ function ReceiptPage({ record }) {
       <p className="eyebrow">PAYOUT RECEIPT</p>
       <h1>{record.milestone || 'Work payout'}</h1>
       <p className="receipt-program">{record.program || 'Paying team'} · {getWorkType(record.workType)}</p>
-      <div className="receipt-amount">{record.amount} <span>token</span></div>
+      <div className="receipt-amount">{record.amount} <span>{record.tokenSymbol || 'token'}</span></div>
       <div className="receipt-lines">
         <div><span>Recipient</span><strong>{shortAddress(record.recipient)}</strong></div>
+        {record.workEvidence?.author && <div><span>GitHub contributor</span><a href={record.workEvidence.authorUrl || `https://github.com/${record.workEvidence.author}`} target="_blank" rel="noreferrer">@{record.workEvidence.author} <Icon name="external" size={13}/></a></div>}
         <div><span>Work evidence</span>{getEvidenceUrl(record) ? <a href={getEvidenceUrl(record)} target="_blank" rel="noreferrer">Open evidence <Icon name="external" size={14}/></a> : <strong>Not attached</strong>}</div>
         <div><span>Payment date</span><strong>{displayDate(record.paidAt)}</strong></div>
         <div><span>Network</span><strong>{network.name}</strong></div>
         <div><span>Token contract</span><strong>{shortAddress(record.token)}</strong></div>
         <div><span>On-chain status</span><strong className={verification === 'confirmed' ? 'positive' : ''}>{verification === 'checking' ? 'Checking token transfer…' : verification === 'confirmed' ? 'Transfer verified' : verification === 'failed' ? 'Transfer details do not match' : verification === 'pending' ? 'Not confirmed yet' : 'No transaction attached'}</strong></div>
       </div>
+      <div className="recipient-wallet-check"><button className="secondary-button" onClick={checkRecipientWallet}><Icon name="wallet" size={14}/> Check my connected wallet</button><span className={recipientWalletCheck}>{recipientWalletCheck === 'match' ? 'This connected wallet matches the recipient.' : recipientWalletCheck === 'mismatch' ? 'This connected wallet is different from the recipient address.' : recipientWalletCheck === 'unavailable' ? 'No compatible wallet was found in this browser.' : recipientWalletCheck === 'cancelled' ? 'Wallet connection was cancelled.' : recipientWalletCheck === 'checking' ? 'Checking wallet address…' : 'Optional: confirm this receipt is addressed to your wallet.'}</span></div>
       {record.txHash && <a className="explorer-link" href={`${network.explorer}/tx/${record.txHash}`} target="_blank" rel="noreferrer">Open transaction in {network.explorerName} <Icon name="external" size={15}/></a>}
       {verification === 'confirmed' && <button className="primary-button receipt-save" onClick={saveToContributorRecord}>{saved ? 'Saved to your contributor record' : 'Save to my contributor record'}</button>}
       <p className="receipt-note">Tender checks the transaction receipt for a matching token, recipient, and amount. Save verified work to your local contributor record.</p>
@@ -194,10 +261,28 @@ function App() {
   const [notice, setNotice] = useState('');
   const [prDetails, setPrDetails] = useState({});
   const [reviewed, setReviewed] = useState(false);
-  const [form, setForm] = useState({ program: '', workType: 'bounty', milestone: '', recipient: '', amount: '', token: '', decimals: '6', evidenceUrl: '', network: 'tempo' });
+  const [form, setForm] = useState({ program: '', workType: 'bounty', milestone: '', recipient: '', amount: '', token: '', tokenSymbol: '', decimals: '6', evidenceUrl: '', network: 'tempo' });
+  const [tokenLookup, setTokenLookup] = useState({ status: 'idle', message: '' });
 
   useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(records)); }, [records]);
   useEffect(() => { localStorage.setItem(CONTRIBUTOR_KEY, JSON.stringify(contributorReceipts)); }, [contributorReceipts]);
+  useEffect(() => {
+    if (!isAddress(form.token)) { setTokenLookup({ status: 'idle', message: '' }); return undefined; }
+    let active = true;
+    const timer = window.setTimeout(async () => {
+      if (active) setTokenLookup({ status: 'checking', message: 'Reading token details from the selected network…' });
+      try {
+        const metadata = await getTokenMetadata(form.network, form.token);
+        if (!active) return;
+        setForm((current) => current.token.toLowerCase() === form.token.toLowerCase() && current.network === form.network
+          ? { ...current, tokenSymbol: metadata.symbol, decimals: String(metadata.decimals) } : current);
+        setTokenLookup({ status: 'ready', message: `${metadata.symbol || 'Token'} · ${metadata.decimals} decimals` });
+      } catch (error) {
+        if (active) setTokenLookup({ status: 'error', message: error.message || 'Could not read token details. Check the address and network.' });
+      }
+    }, 450);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [form.token, form.network]);
   useEffect(() => {
     let active = true;
     contributorReceipts.forEach((item) => {
@@ -241,10 +326,10 @@ function App() {
     }
     setBusy(`evidence-${record.id}`); setNotice(''); setReviewed(false);
     try {
-      const response = await fetch(`https://api.github.com/repos/${parsed.owner}/${parsed.repo}/pulls/${parsed.number}`, { headers: { Accept: 'application/vnd.github+json' } });
+      const response = await fetch(`https://api.github.com/repos/${parsed.owner}/${parsed.repo}/pulls/${parsed.number}`, { headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2026-03-10' } });
       if (!response.ok) throw new Error(response.status === 404 ? 'Pull request not found. Check that the repository is public and the URL is correct.' : response.status === 403 ? 'GitHub rate limit reached. Try again in a few minutes.' : `GitHub returned ${response.status}.`);
       const pr = await response.json();
-      setPrDetails((current) => ({ ...current, [record.id]: { kind: 'github_pr', checked: true, title: pr.title, merged: Boolean(pr.merged), mergedAt: pr.merged_at, author: pr.user?.login, url: pr.html_url, base: pr.base?.repo?.full_name } }));
+      setPrDetails((current) => ({ ...current, [record.id]: { kind: 'github_pr', checked: true, title: pr.title, merged: Boolean(pr.merged), mergedAt: pr.merged_at, author: pr.user?.login, authorUrl: pr.user?.html_url, authorAvatar: pr.user?.avatar_url, url: pr.html_url, base: pr.base?.repo?.full_name, head: pr.head?.ref, baseBranch: pr.base?.ref, additions: pr.additions, deletions: pr.deletions, changedFiles: pr.changed_files } }));
       setNotice(pr.merged ? 'GitHub confirms this pull request was merged. Review the work before approving payment.' : 'This pull request is not merged yet. Tender will not enable payment.');
     } catch (error) { setNotice(error.message || 'Could not check the pull request.'); }
     finally { setBusy(''); }
@@ -262,7 +347,7 @@ function App() {
     if (!parsePrUrl(form.evidenceUrl)) return setFormError('Enter a public GitHub pull request URL. Tender uses the merged PR as the work record.');
     const record = { id: crypto.randomUUID(), ...form, decimals, status: 'review', createdAt: new Date().toISOString() };
     setRecords((current) => [record, ...current]); setSelectedId(record.id); setDialogOpen(false); setReviewed(false); setPrDetails({});
-    setForm({ program: '', workType: 'bounty', milestone: '', recipient: '', amount: '', token: '', decimals: '6', evidenceUrl: '', network: 'tempo' });
+    setForm({ program: '', workType: 'bounty', milestone: '', recipient: '', amount: '', token: '', tokenSymbol: '', decimals: '6', evidenceUrl: '', network: 'tempo' });
     setNotice('Bounty payout created. Check the merged PR, review the work, then pay the contributor.');
   }
 
@@ -281,7 +366,10 @@ function App() {
       await switchWalletNetwork(provider, network);
       const amount = toTokenUnits(record.amount, record.decimals);
       const data = transferCalldata(record.recipient, amount);
-      const txHash = await provider.request({ method: 'eth_sendTransaction', params: [{ from: account, to: record.token, data, value: '0x0' }] });
+      const transaction = { from: account, to: record.token, data, value: '0x0' };
+      setNotice('Checking token balance and transfer rules…');
+      await simulateTokenTransfer(provider, transaction);
+      const txHash = await provider.request({ method: 'eth_sendTransaction', params: [transaction] });
       setNotice(`Transaction submitted. Waiting for ${network.shortName} confirmation…`);
       const receipt = await waitForNetworkReceipt(txHash, record.network || 'tempo');
       if (!matchesTokenTransfer(receipt, record)) throw new Error(`The confirmed transaction did not emit the expected token, recipient, and amount. Check it in the explorer: ${txHash}`);
@@ -305,7 +393,7 @@ function App() {
   function downloadReceipt(record) {
     const evidence = prDetails[record.id] || record.workEvidence || null;
     const network = getNetwork(record.network);
-    const payload = { product: 'Tender', version: 1, organization: record.program, workType: record.workType || 'grant', deliverable: record.milestone, recipient: record.recipient, amount: record.amount, token: record.token, tokenDecimals: record.decimals, evidenceUrl: getEvidenceUrl(record), workEvidence: evidence, reviewer: record.reviewer || null, reviewedAt: record.reviewedAt || null, txHash: record.txHash || null, paidAt: record.paidAt || null, network: network.name, chainId: network.id, recordCreatedAt: record.createdAt };
+    const payload = { product: 'Tender', version: 1, organization: record.program, workType: record.workType || 'bounty', deliverable: record.milestone, recipient: record.recipient, amount: record.amount, token: record.token, tokenSymbol: record.tokenSymbol || null, tokenDecimals: record.decimals, evidenceUrl: getEvidenceUrl(record), workEvidence: evidence, reviewer: record.reviewer || null, reviewedAt: record.reviewedAt || null, txHash: record.txHash || null, paidAt: record.paidAt || null, network: network.name, chainId: network.id, recordCreatedAt: record.createdAt };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const anchor = document.createElement('a'); anchor.href = URL.createObjectURL(blob); anchor.download = `tender-${record.milestone.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-payout.json`; anchor.click(); URL.revokeObjectURL(anchor.href);
   }
@@ -327,7 +415,7 @@ function App() {
         {view === 'contributor' ? <>
           <div className="page-heading"><div><p className="eyebrow">YOUR OPEN-SOURCE WORK HISTORY</p><h1>My work record</h1><p className="page-subtitle">Receipts for completed work, rechecked against each payout network.</p></div><span className="record-count">{contributorReceipts.length} {contributorReceipts.length === 1 ? 'saved receipt' : 'saved receipts'}</span></div>
           <div className="record-intro"><div className="record-intro-mark"><Icon name="check" size={19}/></div><div><strong>Keep proof of paid work with you</strong><p>Open a Tender receipt and save it after its token, recipient, and amount match the on-chain transfer. This record stays in this browser; each receipt link remains shareable.</p></div></div>
-          {contributorReceipts.length ? <div className="contributor-receipts">{contributorReceipts.map((item) => <article className="contributor-receipt" key={item.txHash}><div className="contributor-receipt-top"><span className={`verified-badge ${receiptChecks[item.txHash] === 'verified' ? '' : 'badge-pending'}`}><Icon name={receiptChecks[item.txHash] === 'verified' ? 'check' : 'clock'} size={13}/> {receiptChecks[item.txHash] === 'verified' ? 'On-chain verified' : receiptChecks[item.txHash] === 'unverified' ? 'Transfer not matched' : receiptChecks[item.txHash] === 'unavailable' ? 'Network unavailable' : 'Checking transfer'}</span><span>{displayDate(item.paidAt)}</span></div><h2>{item.milestone || item.workEvidence?.title || 'Open-source contribution'}</h2><p>{item.program || 'Paying team'} · {getWorkType(item.workType)} · {getNetwork(item.network).name}</p><div className="contributor-receipt-bottom"><strong>{item.amount} token</strong><a href={`${getNetwork(item.network).explorer}/tx/${item.txHash}`} target="_blank" rel="noreferrer">View transfer <Icon name="external" size={13}/></a></div><div className="contribution-actions">{getEvidenceUrl(item) && <a className="contribution-evidence" href={getEvidenceUrl(item)} target="_blank" rel="noreferrer">View merged contribution <Icon name="external" size={13}/></a>}<button onClick={() => shareReceipt(item)}>Share receipt</button></div></article>)}</div> : <div className="empty-state record-empty"><div className="empty-icon"><Icon name="file" size={23}/></div><h3>Your work record starts with a paid contribution</h3><p>When a team sends you a Tender receipt, open it and save the verified payout here.</p></div>}
+          {contributorReceipts.length ? <div className="contributor-receipts">{contributorReceipts.map((item) => <article className="contributor-receipt" key={item.txHash}><div className="contributor-receipt-top"><span className={`verified-badge ${receiptChecks[item.txHash] === 'verified' ? '' : 'badge-pending'}`}><Icon name={receiptChecks[item.txHash] === 'verified' ? 'check' : 'clock'} size={13}/> {receiptChecks[item.txHash] === 'verified' ? 'On-chain verified' : receiptChecks[item.txHash] === 'unverified' ? 'Transfer not matched' : receiptChecks[item.txHash] === 'unavailable' ? 'Network unavailable' : 'Checking transfer'}</span><span>{displayDate(item.paidAt)}</span></div><h2>{item.milestone || item.workEvidence?.title || 'Open-source contribution'}</h2><p>{item.program || 'Paying team'} · {item.workEvidence?.author ? `@${item.workEvidence.author} · ` : ''}{getWorkType(item.workType)} · {getNetwork(item.network).name}</p><div className="contributor-receipt-bottom"><strong>{item.amount} {item.tokenSymbol || 'token'}</strong><a href={`${getNetwork(item.network).explorer}/tx/${item.txHash}`} target="_blank" rel="noreferrer">View transfer <Icon name="external" size={13}/></a></div><div className="contribution-actions">{getEvidenceUrl(item) && <a className="contribution-evidence" href={getEvidenceUrl(item)} target="_blank" rel="noreferrer">View merged contribution <Icon name="external" size={13}/></a>}<button onClick={() => shareReceipt(item)}>Share receipt</button></div></article>)}</div> : <div className="empty-state record-empty"><div className="empty-icon"><Icon name="file" size={23}/></div><h3>Your work record starts with a paid contribution</h3><p>When a team sends you a Tender receipt, open it and save the verified payout here.</p></div>}
         </> : <>
         <div className="page-heading"><div><p className="eyebrow">OPEN-SOURCE CONTRIBUTOR PAYOUTS</p><h1>Pay for merged work</h1><p className="page-subtitle">Review a contributor’s merged PR, send the bounty, and give them a receipt they can keep.</p></div><button className="primary-button" onClick={() => { setFormError(''); setDialogOpen(true); }}><Icon name="plus" size={17}/> New bounty payout</button></div>
         <section className="stats-grid" aria-label="Bounty payout summary">
@@ -345,10 +433,10 @@ function App() {
           <section className="detail-panel">
             {selected ? <>
               <div className="detail-head"><div><p className="eyebrow">PAYOUT DETAILS</p><h2>{selected.milestone}</h2><p>{selected.program} · {getWorkType(selected.workType)}</p></div><span className={`status-pill ${selected.status === 'paid' ? 'paid' : 'needs-review'}`}>{selected.status === 'paid' ? 'Paid' : 'Needs review'}</span></div>
-              <div className="detail-amount"><span>Work payout</span><strong>{selected.amount}</strong><small>{selectedNetwork.name} token · {shortAddress(selected.token)}</small></div>
+              <div className="detail-amount"><span>Work payout</span><strong>{selected.amount} {selected.tokenSymbol || ''}</strong><small>{selectedNetwork.name} · {shortAddress(selected.token)}</small></div>
               <div className="detail-section"><div className="section-title"><h3>Recipient</h3><button className="copy-text" onClick={() => navigator.clipboard?.writeText(selected.recipient).then(() => setNotice('Recipient address copied.'))}>Copy address</button></div><a className="address-card" href={`${selectedNetwork.explorer}/address/${selected.recipient}`} target="_blank" rel="noreferrer"><span className="address-avatar">{selected.recipient.slice(2, 4).toUpperCase()}</span><span><strong>{shortAddress(selected.recipient)}</strong><small>View wallet on {selectedNetwork.shortName} <Icon name="external" size={12}/></small></span><Icon name="external" size={15}/></a></div>
-              <div className="detail-section"><div className="section-title"><h3>Work evidence</h3><span className={`evidence-state ${currentEvidence?.checked ? 'confirmed' : ''}`}><span/> {currentEvidence?.kind === 'github_pr' ? (currentEvidence.merged ? 'Merged pull request' : 'Not merged') : currentEvidence?.checked ? 'Link ready' : 'Not reviewed'}</span></div><a className="evidence-card" href={getEvidenceUrl(selected)} target="_blank" rel="noreferrer"><span className="github-mark">{parsePrUrl(getEvidenceUrl(selected)) ? 'GH' : '↗'}</span><span className="evidence-copy"><strong>{currentEvidence?.title || (parsePrUrl(getEvidenceUrl(selected)) ? parsePrUrl(getEvidenceUrl(selected)).repo : 'Supporting evidence')}</strong><small>{getEvidenceUrl(selected).replace('https://', '')}</small></span><Icon name="external" size={15}/></a><button className="check-pr-button" disabled={busy === `evidence-${selected.id}`} onClick={() => checkEvidence(selected)}><Icon name="search" size={15}/>{busy === `evidence-${selected.id}` ? 'Checking GitHub…' : 'Review evidence link'}</button>{currentEvidence?.kind === 'github_pr' && currentEvidence.merged && <div className="pr-meta"><span><Icon name="check" size={14}/> Merged {displayDate(currentEvidence.mergedAt)}</span>{currentEvidence.author && <span>by @{currentEvidence.author}</span>}</div>}</div>
-              {selected.status === 'paid' ? <div className="paid-card"><div className="paid-heading"><span className="paid-check"><Icon name="check" size={17}/></span><div><strong>Payment confirmed</strong><small>{displayDate(selected.paidAt)} · {selectedNetwork.name}</small></div></div><a className="tx-link" href={`${selectedNetwork.explorer}/tx/${selected.txHash}`} target="_blank" rel="noreferrer">{shortAddress(selected.txHash)} <Icon name="external" size={14}/></a><div className="receipt-actions"><button className="secondary-button" onClick={() => shareReceipt(selected)}>Share recipient receipt</button><button className="icon-action" title="Download payout record" onClick={() => downloadReceipt(selected)}><Icon name="file" size={17}/></button></div></div> : <div className="approval-box"><div className="approval-title"><span className="step-index">1</span><div><strong>Review and release</strong><small>Confirm the work before sending funds.</small></div></div>{currentEvidence?.checked && (currentEvidence.kind !== 'github_pr' || currentEvidence.merged) ? <label className="review-check"><input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)}/><span>I reviewed the linked work and approve this payout.</span></label> : <p className="review-hint">Review the evidence link first. GitHub pull requests must be merged.</p>}<button className="pay-button" disabled={!currentEvidence?.checked || (currentEvidence.kind === 'github_pr' && !currentEvidence.merged) || !reviewed || Boolean(busy)} onClick={() => payMilestone(selected)}>{busy === `pay-${selected.id}` ? 'Waiting for transaction…' : <><Icon name="wallet" size={16}/> Pay {selected.amount} on {selectedNetwork.shortName}</>}</button><p className="pay-footnote">Your connected wallet will confirm the token transfer on {selectedNetwork.name}.</p></div>}
+              <div className="detail-section"><div className="section-title"><h3>Work evidence</h3><span className={`evidence-state ${currentEvidence?.checked ? 'confirmed' : ''}`}><span/> {currentEvidence?.kind === 'github_pr' ? (currentEvidence.merged ? 'Merged pull request' : 'Not merged') : currentEvidence?.checked ? 'Link ready' : 'Not reviewed'}</span></div><a className="evidence-card" href={getEvidenceUrl(selected)} target="_blank" rel="noreferrer"><span className="github-mark">{parsePrUrl(getEvidenceUrl(selected)) ? 'GH' : '↗'}</span><span className="evidence-copy"><strong>{currentEvidence?.title || (parsePrUrl(getEvidenceUrl(selected)) ? parsePrUrl(getEvidenceUrl(selected)).repo : 'Supporting evidence')}</strong><small>{getEvidenceUrl(selected).replace('https://', '')}</small></span><Icon name="external" size={15}/></a><button className="check-pr-button" disabled={busy === `evidence-${selected.id}`} onClick={() => checkEvidence(selected)}><Icon name="search" size={15}/>{busy === `evidence-${selected.id}` ? 'Checking GitHub…' : 'Review evidence link'}</button>{currentEvidence?.kind === 'github_pr' && currentEvidence.merged && <div className="pr-meta"><span><Icon name="check" size={14}/> Merged {displayDate(currentEvidence.mergedAt)}</span>{currentEvidence.author && <a href={currentEvidence.authorUrl || `https://github.com/${currentEvidence.author}`} target="_blank" rel="noreferrer">by @{currentEvidence.author} <Icon name="external" size={12}/></a>}<span>{currentEvidence.changedFiles ?? '—'} files · +{currentEvidence.additions ?? '—'} / −{currentEvidence.deletions ?? '—'}</span></div>}</div>
+              {selected.status === 'paid' ? <div className="paid-card"><div className="paid-heading"><span className="paid-check"><Icon name="check" size={17}/></span><div><strong>Payment confirmed</strong><small>{displayDate(selected.paidAt)} · {selectedNetwork.name}</small></div></div><a className="tx-link" href={`${selectedNetwork.explorer}/tx/${selected.txHash}`} target="_blank" rel="noreferrer">{shortAddress(selected.txHash)} <Icon name="external" size={14}/></a><div className="receipt-actions"><button className="secondary-button" onClick={() => shareReceipt(selected)}>Share recipient receipt</button><button className="icon-action" title="Download payout record" onClick={() => downloadReceipt(selected)}><Icon name="file" size={17}/></button></div></div> : <div className="approval-box"><div className="approval-title"><span className="step-index">1</span><div><strong>Review and release</strong><small>Confirm the work before sending funds.</small></div></div>{currentEvidence?.checked && (currentEvidence.kind !== 'github_pr' || currentEvidence.merged) ? <label className="review-check"><input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)}/><span>I reviewed the merged change{currentEvidence.author ? ` by @${currentEvidence.author}` : ''} and confirmed this payout address with the contributor.</span></label> : <p className="review-hint">Review the evidence link first. GitHub pull requests must be merged.</p>}<button className="pay-button" disabled={!currentEvidence?.checked || (currentEvidence.kind === 'github_pr' && !currentEvidence.merged) || !reviewed || Boolean(busy)} onClick={() => payMilestone(selected)}>{busy === `pay-${selected.id}` ? 'Checking and sending…' : <><Icon name="wallet" size={16}/> Pay {selected.amount} {selected.tokenSymbol || ''} on {selectedNetwork.shortName}</>}</button><p className="pay-footnote">Tender simulates the token transfer first. Your wallet signs only after the preflight succeeds.</p></div>}
               <div className="record-meta"><span>Created {displayDate(selected.createdAt)}</span><span>Chain ID {selectedNetwork.id}</span></div>
             </> : <div className="detail-empty"><div className="detail-empty-icon"><Icon name="arrow" size={21}/></div><h3>Select a payout</h3><p>Choose a work item to review its evidence and payment details.</p></div>}
           </section>
@@ -367,11 +455,11 @@ function App() {
             <label className="field full"><span>Paying team or repository owner</span><input value={form.program} onChange={(e) => setForm({ ...form, program: e.target.value })} placeholder="e.g. Acme Protocol" autoFocus/></label>
             <label className="field full"><span>What did the contributor build?</span><input value={form.milestone} onChange={(e) => setForm({ ...form, milestone: e.target.value })} placeholder="e.g. Add wallet connection support"/></label>
             <label className="field full"><span>Public merged pull request</span><input value={form.evidenceUrl} onChange={(e) => setForm({ ...form, evidenceUrl: e.target.value })} placeholder="https://github.com/org/repo/pull/123" spellCheck="false"/><small>Only public GitHub pull requests are supported in this first version.</small></label>
-            <label className="field full"><span>Payment network</span><select value={form.network} onChange={(e) => setForm({ ...form, network: e.target.value })}><option value="tempo">Tempo Moderato</option><option value="robinhood">Robinhood Chain Testnet</option></select><small>{form.network === 'robinhood' ? <>Test ETH is required for gas. Get it from the <a className="inline-link" href={NETWORKS.robinhood.faucet} target="_blank" rel="noreferrer">Robinhood testnet faucet <Icon name="external" size={11}/></a>.</> : 'Tempo Moderato testnet payment.'}</small></label>
+            <label className="field full"><span>Payment network</span><select value={form.network} onChange={(e) => setForm({ ...form, network: e.target.value })}><option value="tempo">Tempo Moderato</option><option value="robinhood">Robinhood Chain Testnet</option></select><small>{form.network === 'robinhood' ? <>Test ETH is required for gas. Get it from the <a className="inline-link" href={NETWORKS.robinhood.faucet} target="_blank" rel="noreferrer">Robinhood testnet faucet <Icon name="external" size={11}/></a>.</> : <>Get test stablecoins from the <a className="inline-link" href={NETWORKS.tempo.faucet} target="_blank" rel="noreferrer">Tempo faucet <Icon name="external" size={11}/></a>.</>}</small></label>
             <label className="field full"><span>Contributor wallet</span><input value={form.recipient} onChange={(e) => setForm({ ...form, recipient: e.target.value })} placeholder="Ask the contributor for their payout address" spellCheck="false"/><small>Confirm this address with the contributor. GitHub usernames do not prove wallet ownership.</small></label>
             <label className="field"><span>Payment amount</span><input value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} placeholder="1000" inputMode="decimal"/></label>
-            <label className="field"><span>Token decimals</span><input value={form.decimals} onChange={(e) => setForm({ ...form, decimals: e.target.value })} placeholder="6" inputMode="numeric"/></label>
-            <label className="field full"><span>Token contract</span><input value={form.token} onChange={(e) => setForm({ ...form, token: e.target.value })} placeholder="0x…" spellCheck="false"/><small>Enter a token contract deployed on {getNetwork(form.network).name} and its decimal precision.</small></label>
+            <label className="field"><span>Token decimals</span><input value={form.decimals} onChange={(e) => setForm({ ...form, decimals: e.target.value })} placeholder="Read from token" inputMode="numeric" readOnly={tokenLookup.status === 'ready'}/></label>
+            <label className="field full"><span>Token contract</span><input value={form.token} onChange={(e) => setForm({ ...form, token: e.target.value, tokenSymbol: '', decimals: '6' })} placeholder="0x…" spellCheck="false"/><small className={`token-lookup ${tokenLookup.status}`}>{tokenLookup.message || `Token symbol and decimals are read from ${getNetwork(form.network).shortName} when available.`}</small></label>
           </div>
           {formError && <p className="form-error">{formError}</p>}
           <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setDialogOpen(false)}>Cancel</button><button type="submit" className="primary-button">Create bounty payout <Icon name="arrow" size={16}/></button></div>

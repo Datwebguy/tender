@@ -9,10 +9,11 @@ Pay a bounty for a merged public GitHub pull request. Tender keeps the contribut
 ## Flow
 
 1. A payer creates a bounty entry with the public pull request, the contributor's payout address, amount, and token contract.
-2. Tender checks GitHub's public API and requires the pull request to be merged.
-3. The payer reviews the work and confirms the transfer in their wallet.
-4. Tender checks the chain receipt for a successful ERC-20 `Transfer` event with the expected token contract, recipient, and amount.
-5. The payer shares the receipt. The contributor opens it, Tender checks the transaction again, and the contributor can save it in **My work record**.
+2. Tender checks GitHub's public API for merge status, author, and change summary. The payer can open the linked contributor profile.
+3. Tender reads the token symbol and decimal precision from the selected chain when the contract supports the standard metadata calls.
+4. The payer reviews the contribution and confirms they checked the contributor's payout address. Tender simulates the transfer before asking the wallet to sign; Tempo TIP-403 policy and token balance failures can stop the transfer before submission.
+5. Tender checks the chain receipt for a successful `Transfer` event with the expected token contract, recipient, and amount.
+6. The payer shares the receipt. The contributor opens it, Tender checks the transaction again, and the contributor can optionally connect a wallet to confirm the recipient address before saving it in **My work record**.
 
 ## Networks
 
@@ -23,7 +24,7 @@ The app currently targets testnets:
 | Tempo Moderato | `42431` | `https://rpc.moderato.tempo.xyz` | USD-denominated gas |
 | Robinhood Chain Testnet | `46630` | `https://rpc.testnet.chain.robinhood.com` | ETH |
 
-Tempo network details are in [Tempo's developer docs](https://tempo.xyz/developers). Robinhood Chain connection details and its testnet faucet are in [official developer docs](https://docs.robinhood.com/chain/connecting/). The payer supplies the token contract address and decimals. Both parties need compatible EVM wallets; the payer also needs the testnet token and any required gas balance.
+Tempo's Moderato settings come from the [official Tempo repository](https://github.com/tempoxyz/tempo); read about [TIP-20](https://tempo.xyz/developers/docs/protocol/tip20/overview) and [TIP-403 transfer policies](https://tempo.xyz/developers/docs/protocol/tip403/overview). The [Tempo faucet guide](https://tempo.xyz/developers/docs/quickstart/faucet) supplies testnet funds. Robinhood Chain connection details and its testnet faucet are in [official developer docs](https://docs.robinhood.com/chain/connecting/). The payer supplies the token contract address; Tender reads its symbol and decimals when available. Both parties need compatible EVM wallets; the payer also needs the testnet token and any required gas balance.
 
 ## Run locally
 
@@ -39,6 +40,9 @@ Build the production bundle with `npm run build`.
 - This is a testnet MVP. No mainnet payments, production deployment configuration, or audited contract is included.
 - Team payouts and contributor records are stored in the current browser's local storage. There is no account, shared workspace, or cross-device sync.
 - GitHub verification uses its public API. Private repositories are not supported. A merged PR is evidence of merge status, not proof of quality or wallet ownership; a human reviewer checks the work and confirms the contributor's payout address.
+- GitHub author/profile and PR change summary are signals for human review; Tender does not establish GitHub-to-wallet identity.
+- The optional wallet check on a receipt compares the connected address with the payout recipient. It requests wallet account access, but does not ask for a signature or submit a transaction.
+- Token metadata reads and transfer simulations use the selected network's RPC. Metadata calls are best-effort; the payer can enter decimals manually if the contract does not expose standard metadata.
 - The contributor's saved record is a convenience view over receipt links, not a credential or identity service. Receipts can be rechecked against the chain, but the local list itself is editable and browser-bound.
 - Receipt links encode the payout record in their URL. Anyone with the link can view it; avoid adding confidential data.
 - Transfers are sent directly from the payer's wallet. Tender does not hold funds, escrow, schedule, or reverse a transfer.
