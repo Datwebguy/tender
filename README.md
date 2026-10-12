@@ -1,25 +1,29 @@
 # Tender
 
-Tender is payout operations for Web3 teams that pay external contributors for completed work. A team records the deliverable and evidence, a reviewer approves it, and the payer releases tokens on the network holding its funds. Grants, bounties, and contributor contracts use the same work-to-approval-to-payment flow.
+Tender is a payout and proof-of-work record for open-source contributors. A Web3 team checks a contributor's public merged GitHub pull request, reviews the work, and pays the contributor on a supported network. The contributor receives a receipt they can verify and save to their own work record.
 
-## Current flow
+## The first use case
 
-- Create a work item for a grant milestone, bounty, contributor contract, or other deliverable.
-- Add the recipient wallet, amount, token contract, token decimals, payout network, and an evidence link.
-- Tender reads public GitHub pull-request status. A pull request must be merged before it can be approved. Other evidence links are reviewed by the payer.
-- A human reviewer signs off. An injected EVM wallet submits the token transfer on the selected network.
-- Tender waits for the transaction receipt and lets the payer share a recipient receipt or download a JSON payout record.
+Pay a bounty for a merged public GitHub pull request. Tender keeps the contribution link, human approval, token payment, and transaction proof together. The contributor can keep the receipt and share it as evidence of completed, paid work.
 
-## Supported networks
+## Flow
 
-The current build targets public testnets:
+1. A payer creates a bounty entry with the public pull request, the contributor's payout address, amount, and token contract.
+2. Tender checks GitHub's public API and requires the pull request to be merged.
+3. The payer reviews the work and confirms the transfer in their wallet.
+4. Tender checks the chain receipt for a successful ERC-20 `Transfer` event with the expected token contract, recipient, and amount.
+5. The payer shares the receipt. The contributor opens it, Tender checks the transaction again, and the contributor can save it in **My work record**.
+
+## Networks
+
+The app currently targets testnets:
 
 | Network | Chain ID | RPC | Gas token |
 | --- | ---: | --- | --- |
 | Tempo Moderato | `42431` | `https://rpc.moderato.tempo.xyz` | USD-denominated gas |
 | Robinhood Chain Testnet | `46630` | `https://rpc.testnet.chain.robinhood.com` | ETH |
 
-Tempo network details are in [Tempo's developer docs](https://tempo.xyz/developers). Robinhood Chain connection details and its testnet faucet are in the [official developer documentation](https://docs.robinhood.com/chain/connecting/). Tender does not assume a token address: enter a token contract deployed on the selected network and its decimal precision. The recipient and payer need compatible wallets and testnet assets; the Robinhood testnet payer also needs test ETH for gas.
+Tempo network details are in [Tempo's developer docs](https://tempo.xyz/developers). Robinhood Chain connection details and its testnet faucet are in [official developer docs](https://docs.robinhood.com/chain/connecting/). The payer supplies the token contract address and decimals. Both parties need compatible EVM wallets; the payer also needs the testnet token and any required gas balance.
 
 ## Run locally
 
@@ -28,13 +32,14 @@ npm install
 npm run dev
 ```
 
-Create a production bundle with `npm run build`.
+Build the production bundle with `npm run build`.
 
 ## Current limits
 
-- Work records are stored in the browser's local storage. They are not synchronized between team members or devices.
-- GitHub status checks work for public pull requests only. A merged PR is an evidence signal, not a judgment of work quality; a human reviewer must approve.
-- Non-PR evidence links are not independently verified. The reviewer opens the link and records approval.
-- Tender sends a direct token transfer from the connected wallet. It does not custody funds, escrow them, or enforce work agreements on-chain.
-- Shared receipt links encode the payout record in the URL. Anyone with the link can view it; do not include confidential information.
-- These integrations target testnets. There is no authentication, role management, server-side audit log, production-chain configuration, or audited payout contract yet.
+- This is a testnet MVP. No mainnet payments, production deployment configuration, or audited contract is included.
+- Team payouts and contributor records are stored in the current browser's local storage. There is no account, shared workspace, or cross-device sync.
+- GitHub verification uses its public API. Private repositories are not supported. A merged PR is evidence of merge status, not proof of quality or wallet ownership; a human reviewer checks the work and confirms the contributor's payout address.
+- The contributor's saved record is a convenience view over receipt links, not a credential or identity service. Receipts can be rechecked against the chain, but the local list itself is editable and browser-bound.
+- Receipt links encode the payout record in their URL. Anyone with the link can view it; avoid adding confidential data.
+- Transfers are sent directly from the payer's wallet. Tender does not hold funds, escrow, schedule, or reverse a transfer.
+- Token contracts and decimal precision are entered by the payer and should be checked before payment.
