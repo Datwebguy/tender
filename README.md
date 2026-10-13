@@ -8,7 +8,7 @@ Tender connects creative digital services with payment: a buyer orders a persona
 [![Solidity](https://img.shields.io/badge/Solidity-%5E0.8.24-363636)](contracts/TenderEscrow.sol)
 [![Vite](https://img.shields.io/badge/build-Vite-646cff)](#development)
 
-[Live app](https://ontender.vercel.app) · [Repository](https://github.com/Datwebguy/tender) · [Escrow deployment notes](contracts/DEPLOY.md) · [API setup](api/README.md)
+[Live app](https://ontender.xyz) · [Repository](https://github.com/Datwebguy/tender) · [Escrow deployment notes](contracts/DEPLOY.md) · [API setup](api/README.md)
 
 ## At a glance
 
@@ -69,7 +69,7 @@ Highlights:
 
 The shortest way to inspect the working path is:
 
-1. Open the [live app](https://ontender.vercel.app) on Tempo Moderato.
+1. Open the [live app](https://ontender.xyz) on Tempo Moderato.
 2. Select **Brand card** or **Launch graphic** from the catalog.
 3. Create the order and open its checkout link.
 4. Connect a wallet configured for chain `42431` and fund it with Moderato testnet pathUSD.
