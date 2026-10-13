@@ -1,0 +1,9 @@
+.vercel
+.env*
+evidence
+HANDOVER.md
+video
+node_modules
+dist
+*.tgz
+reference-contact.png

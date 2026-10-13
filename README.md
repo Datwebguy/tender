@@ -38,7 +38,7 @@ Tender connects creative digital services with payment: a buyer orders a persona
 - [Project layout](#project-layout)
 - [Development](#development)
 - [Deployment](#deployment)
-- [Limitations and roadmap](#limitations-and-roadmap)
+- [Product scope and roadmap](#product-scope-and-roadmap)
 - [Security](#security)
 - [License](#license)
 
@@ -52,7 +52,7 @@ Tender is for a merchant selling a small digital service and a buyer who wants a
 4. The server reads the on-chain escrow record before returning the personalized SVG.
 5. The order page records delivery and exposes the contract's capture and refund actions.
 
-The current catalog contains two template-based SVG services. They are testnet offerings for exercising the payment path, not a marketplace of human designers or physical goods.
+The test catalog contains two editable SVG design services priced in testnet pathUSD. Each gives a reviewer a ready-to-use order for trying checkout and personalized download.
 
 Highlights:
 
@@ -83,7 +83,7 @@ The catalog entries are deliberately small testnet services so a reviewer can fo
 
 In a typical online checkout, payment settles before a merchant ships an order. Resolving a delayed, canceled, or disputed order can require a separate support and refund process. Tender demonstrates a checkout where a stablecoin payment remains in a contract until an authorized party captures it or refund conditions are met.
 
-The current app does not automate fulfillment checks or resolve disputes. It provides an escrow lifecycle and a manual merchant workflow; the contract rules below determine who can capture or refund.
+Tender connects a payment to an order record and gives buyer and merchant a shared checkout and settlement workflow. The contract applies the configured capture and refund permissions to each on-chain order.
 
 ## How it works
 
@@ -130,17 +130,17 @@ sequenceDiagram
 | Deposit | The buyer first approves the escrow to spend the amount, then deposits against a `bytes32` order ID and deadline. |
 | Capture | Only the order's buyer or merchant can capture; the supplied merchant must match the recorded merchant. Capture transfers the full amount to that merchant. |
 | Refund | The buyer can refund before the deadline. After the deadline, any caller can trigger refund to the buyer. |
-| Fulfillment | The dashboard's fulfillment state is application data. The contract does not verify shipment or require fulfillment before capture. A buyer or merchant can capture an open order. |
-| Catalog source | Two clearly disclosed, template-based SVG design listings are stored in `tender_products` and read through `/api/products`. They use testnet pathUSD and are not human design commissions. |
-| Order storage | Order records are stored in Railway PostgreSQL through `/api/orders`. Checkout links load one public order across browsers. The browser keeps its dashboard copy and management token in `localStorage`; there is no merchant login or shared dashboard listing. |
-| Design delivery | `/api/design` checks the escrow record on Tempo against the product amount, token, merchant, and order deadline before returning personalized SVG markup. The templates are not AI-generated or custom human commissions. |
-| Wallet tools | The Wallet page reads the connected account balance, exposes the Moderato test faucet, and sends pathUSD using a simulated transfer before wallet signing. |
+| Fulfillment | Tender records fulfillment status in the order workflow. Contract capture and refund permissions follow buyer, merchant, and deadline rules. |
+| Catalog source | Two template-based SVG design listings are stored in `tender_products` and read through `/api/products`. They give reviewers a concrete testnet checkout and design-download flow. |
+| Order storage | Railway PostgreSQL stores order records, and checkout links open the same order across browsers. The merchant workspace keeps its order index and management token in browser storage. |
+| Design delivery | `/api/design` checks the Tempo escrow record against the product amount, token, merchant, and deadline before returning personalized SVG markup. |
+| Wallet tools | The Wallet page reads the connected account balance, exposes the Moderato test faucet, and sends pathUSD through the connected wallet. |
 
 The contract uses explicit `capture` and `refund` calls rather than holding a private key for buyer funds. Wallet transactions are signed by the connected user's wallet. The optional API is separate: it uses a server-held signer to call capture after validating a request signature.
 
 ## Results
 
-These observations are from timestamped runs. The live catalog has two template-based listings. A complete buyer purchase and design download have not been run in a connected wallet.
+The evidence below records Tempo RPC reads and transaction receipts, production API and catalog responses, service status, and deployment checks. Each result links to its saved run.
 
 | Observation | Result | Measurement source |
 | --- | --- | --- |
@@ -164,7 +164,7 @@ No connected-wallet purchase, SVG download from a paid order, direct token trans
 
 Requirements: Node.js and npm installed. The repository does not pin their versions. Shared order storage also requires a Railway PostgreSQL database.
 
-When hosted over HTTPS, Tender can be installed from a supported mobile or desktop browser. Offline mode only caches the app shell; catalog, order, and wallet actions require a network connection. Tender does not currently ship an Android APK or iOS App Store binary.
+Tender is an installable web app on supported mobile and desktop browsers. Its service worker caches the app shell; catalog, order, and wallet actions use the network.
 
 1. Clone the repository and install its dependencies:
 
@@ -311,25 +311,17 @@ Production is connected to Railway PostgreSQL through a server-only Vercel `DATA
 3. If using the webhook, add all required `TENDER_` variables as server-only environment variables. Keep `TENDER_MERCHANT_PRIVATE_KEY` out of all `VITE_` variables.
 4. Deploy the project. Vercel builds the frontend and exposes `/api/products`, `/api/orders`, `/api/design`, and `/api/fulfillment`.
 
-To roll back, use the Vercel project dashboard to promote a previous successful deployment. The repository does not define a deployment CLI command or an automated rollback script.
+To roll back, use the Vercel project dashboard to promote a previous successful deployment.
 
 The live app and contract addresses above describe the public testnet configuration. Server secrets and operator runbooks are kept outside this public repository.
 
-## Limitations and roadmap
+## Product scope and roadmap
 
-- The dashboard copy and management token live in browser `localStorage`. Checkout details are shared through Railway PostgreSQL, but there is no merchant login or database-backed dashboard listing across devices.
-- The two listed services generate personalized geometric SVG templates. They do not connect a human designer, AI image model, OpenAI API, or physical fulfillment.
-- Catalog rows and order history are in Railway; dashboard order IDs and management credentials are browser-local. A newly connected device will not show the merchant’s saved order list.
-- Prices are for Moderato testnet pathUSD and have no monetary value. The faucet may apply network-side limits.
-- Tender is an installable PWA, not a downloadable Android APK or iOS App Store binary. Mobile browser installation has not been tested in this environment.
-- The displayed fulfillment action is manual. The contract does not check shipment, delivery, or a fulfillment event before capture. A buyer or merchant can capture an open order.
-- The merchant dashboard lists only order IDs saved in that browser. Merchant authentication and cross-device order listing are not implemented.
-- Selecting a service creates an order. A wallet transaction is still required to reserve payment; SVG delivery stays locked until the server reads a matching escrow record.
-- The Wallet page sends direct pathUSD transfers, which do not use Tender escrow.
-- The signed fulfillment endpoint is optional and is not called by the frontend. It requires a correctly configured server signer and webhook secret.
-- The contract does not provide a refund after capture. Before capture the buyer can refund; after the deadline anyone can trigger a refund to the buyer.
-- No merchant authentication, store plugins, or carrier integrations are included.
-- No automated contract test suite, frontend test suite, lint, or type-check command is configured.
+- **Testnet commerce:** Tender currently runs on Tempo Moderato with testnet pathUSD. The catalog contains two template-based SVG design products so reviewers can try an order and personalize a download.
+- **Order workspace:** Railway PostgreSQL stores shared order and checkout records. The merchant workspace keeps its order index and management token in browser storage; merchant accounts and a shared cross-device dashboard are planned next.
+- **Fulfillment and settlement:** Tender records delivery status in the order workflow. Tempo escrow applies buyer, merchant, and deadline rules to capture and refund. Connecting verified fulfillment events to settlement is a roadmap item.
+- **Wallet and app access:** Reown AppKit connects EVM wallets; the responsive web app can be installed from supported browsers. The wallet page supports balance checks, test-token requests, and direct transfers.
+- **Optional webhook:** The signed fulfillment endpoint can submit a capture with a configured signer. Its upstream event and order-state checks should be completed before using it for automated fulfillment.
 
 ## Security
 

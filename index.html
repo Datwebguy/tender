@@ -3,12 +3,29 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f6f6f2" />
-    <meta name="description" content="Tender protects online orders with Tempo stablecoin payments reserved until fulfillment." />
-    <title>Tender — protected commerce settlement</title>
+    <meta name="theme-color" content="#f7f7f2" />
+    <meta name="description" content="Tender checkout uses Tempo Moderato escrow contracts for payment capture and refunds." />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <meta name="apple-mobile-web-app-title" content="Tender" />
+    <title>Tender — Shop, pay, and track your orders</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><div id="boot-status" role="status" style="padding:40px;font-family:Arial,sans-serif;max-width:480px;margin:auto"><h1>Tender</h1><p id="boot-message">Opening your orders and payments…</p><a href="/">Reload Tender</a></div></div>
+    <script>
+      // Keep a readable recovery screen if an embedded browser cannot load the bundle.
+      window.addEventListener('error', function () {
+        var message = document.getElementById('boot-message');
+        if (message) message.textContent = 'Tender could not finish loading. Reload this page. If it still fails, update your wallet app or open this URL in Chrome or Safari.';
+      }, true);
+      window.addEventListener('unhandledrejection', function () {
+        var message = document.getElementById('boot-message');
+        if (message) message.textContent = 'Tender could not start. Check your connection and reload this page.';
+      });
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

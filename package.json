@@ -5,13 +5,22 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
+    "dev:vercel": "npx vercel dev",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@reown/appkit": "^1.8.24",
+    "@reown/appkit-adapter-wagmi": "^1.8.24",
+    "@tanstack/react-query": "^5.104.2",
+    "postgres": "^3.4.9",
     "react": "latest",
     "react-dom": "latest",
     "viem": "^2.57.4",
-    "vite": "latest"
+    "vite": "latest",
+    "wagmi": "^2.19.5"
+  },
+  "overrides": {
+    "ws": "^8.21.0"
   }
 }

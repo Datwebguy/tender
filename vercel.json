@@ -5,6 +5,15 @@
   "functions": {
     "api/fulfillment.js": {
       "maxDuration": 30
+    },
+    "api/orders.js": {
+      "maxDuration": 30
+    },
+    "api/products.js": {
+      "maxDuration": 30
+    },
+    "api/design.js": {
+      "maxDuration": 30
     }
   }
 }
