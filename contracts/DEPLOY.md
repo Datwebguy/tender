@@ -1,6 +1,6 @@
 # Deploy Tender escrow
 
-TenderEscrow is deployed on Tempo Moderato at `0x92ac3f063a75eed5920e18d0031e2646d939c731`. See `../HANDOVER.md` for the deployment transaction and configured merchant. The steps below are for deploying a separate instance.
+TenderEscrow is deployed on Tempo Moderato at `0x92ac3f063a75eed5920e18d0031e2646d939c731`. The steps below are for deploying a separate instance.
 
 ## Remix path
 
