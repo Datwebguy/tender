@@ -5,3 +5,9 @@ dist
 !.env.example
 
 .vercel
+
+# Local evidence, video renders, and downloaded build archives are not source files.
+evidence/
+video/
+*.tgz
+reference-contact.png
